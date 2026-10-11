@@ -2,7 +2,7 @@
 
 Date: 2026-10-11 (UTC)  
 Host: Windows 10 Pro build 26200.9457 x64  
-Repo commit: `8b6adb0e50fb168f9a8c673641979004f1d7237e`  
+Repo commit: `5fd823bc0aeead8899293d7ef50965460f921cd6`  
 Pinned upstream OMP: `2a2c6dcbbb558c0f8145f67f28b3370984f2bf60` (v18.6.1)  
 Product identity: `canoPi` 1.0.0, identifier `app.canopi.desktop`, publisher `canoPi Project`  
 Build result: **SUCCESS** (all 27 pipeline steps completed)
@@ -49,7 +49,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -E
 
 ## 2. Packaging / Release-Script Issues Repaired
 
-During this run, four root causes were identified and fixed in packaging/configuration paths:
+During this run and the release pipeline finalization, root causes were repaired in packaging/configuration paths:
 
 1. **Main binary name mismatch**:
    - *Symptom*: NSIS package bundled `canopi-desktop.exe` (from Cargo package name), failing installed-runtime verification expecting `canoPi.exe`.
@@ -67,6 +67,9 @@ During this run, four root causes were identified and fixed in packaging/configu
    - *Symptom*: In step "Create BUILD-MANIFEST.json", `ConvertFrom-Json` on `package-lock.json` failed with `Cannot process argument because the value of argument "name" is not valid` because npm lockfile v3 contains an empty-string root package key `""` which PS 5.1 rejects as a PSCustomObject property name.
    - *Fix*: Replaced `ConvertFrom-Json` call in `scripts/build-windows.ps1` with direct .NET regex matching for `@tauri-apps/cli` version.
 
+5. **Release artifact naming and installer zip bundle**:
+   - *Symptom*: Initial pipeline names used lowercase prefixes (`canopi-windows-x64-setup-1.0.0.exe`, `canopi-source-1.0.0.zip`) and installer ZIP lacked bundle checksums.
+   - *Fix*: Standardized release artifact names in `scripts/build-windows.ps1` and `scripts/collect-release-evidence.ps1` to `canoPi-Setup-1.0.0-win-x64.exe` and `canoPi-source-1.0.0.zip`; bundled `SHA256SUMS.txt` inside `canoPi-windows-installer.zip` alongside the installer executable, `ENGINE-PROVENANCE.json`, and `BUILD-MANIFEST.json`.
 ---
 
 ## 3. Verified Release Artifacts and Hashes
@@ -75,15 +78,25 @@ All release artifacts reside in `release/`:
 
 | Artifact | File Size (bytes) | SHA256 Hash |
 |---|---|---|
-| `canopi-windows-x64-setup-1.0.0.exe` | 114,088,880 | `F64E6687FC2F4446EABD75C3AE80BC9D70840C69CB6B9F5727CBAA6359411777` |
-| `canopi-source-1.0.0.zip` | 359,135 | `2A38EB2F745E3BE65369CA4E4CE6AEE0D8619E6A96D941F1013BC6B72190C653` |
-| `canoPi-windows-installer.zip` | 114,105,556 | `7624FA679DD87B079F236A1BB6C241093800330F6E0275A5093B22B2E3839195` |
+| `canoPi-Setup-1.0.0-win-x64.exe` | 114,085,663 | `F446E7ADDC2ACEC4026435114EFD8C7D77C3098B39A757FF824A75FBB95D93A4` |
+| `canoPi-source-1.0.0.zip` | 363,118 | `401D77B0179FF3A4E11E9D9CE14FCD423ED1FF7E555A50E2D77829DB8042E87B` |
+| `canoPi-windows-installer.zip` | 114,102,653 | `A8754533586DA6F0FA9F97D88A8D2F8EC47BD750DB9B615394DFCA56BA4AAC8A` |
 | `ENGINE-PROVENANCE.json` | 883 | `785353767590BB4E828344BB545F1681941DDDCC084FFF36261E996005A5ADAE` |
-| `BUILD-MANIFEST.json` | 3,248 | `07E13FAADAD51BB465DC946B333E36C39F228BC59EEF340A53A0E28C9833DD1F` |
-| `SHA256SUMS.txt` | 469 | *(covers the 5 primary artifacts above; byte-for-byte verified)* |
-| `RELEASE_TEST_REPORT.md` | 10,089 | *(evidence report generated last)* |
+| `BUILD-MANIFEST.json` | 3,245 | `BA998FE81CBFC4016F3DDB243D7BC3565539561D9A119A4F4262C6D2C232A405` |
+| `SHA256SUMS.txt` | 465 | *(covers the 5 primary artifacts above; byte-for-byte verified)* |
+| `RELEASE_TEST_REPORT.md` | 8,729 | *(evidence report generated last)* |
 
 Installer binary format: verified Windows PE (`MZ` header present, length > 100 MiB).
+
+`canoPi-windows-installer.zip` contains:
+- `canoPi-Setup-1.0.0-win-x64.exe` (114,085,663 bytes)
+- `ENGINE-PROVENANCE.json` (883 bytes)
+- `BUILD-MANIFEST.json` (3,245 bytes)
+- `SHA256SUMS.txt` (278 bytes, covering the 3 bundle files)
+
+`canoPi-source-1.0.0.zip` verified inclusion:
+- `src/app/CanoPi.jsx` (142,558 bytes, SHA256 `3f94504f728a4aea969f081e9e1a03fe20977f150b2eeae4fde3e38d72a0ed3d`): includes the committed bright user message bubble styling (`rgba(238,247,249,.88)` and light theme `rgba(255,255,255,.94)`).
+- `SOURCE-ZIP-README.txt` instructions for reproduction.
 
 ---
 

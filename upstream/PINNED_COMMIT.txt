@@ -1,0 +1,6 @@
+Repository: https://github.com/can1357/oh-my-pi.git
+Release: v18.6.1 (2026-10-04)
+Commit: 2a2c6dcbbb558c0f8145f67f28b3370984f2bf60
+Source: https://github.com/can1357/oh-my-pi/commit/2a2c6dcbbb558c0f8145f67f28b3370984f2bf60
+Status: verified via published GitHub source pages, but actual local clone and build could not run here due to DNS/toolchain limits.
+CI behavior: clone and checkout this SHA, apply tracked build-source patch, build cnp-engine.exe from source, smoke-test the resulting executable, bundle with Tauri NSIS. It NEVER downloads and renames an existing OMP release executable.

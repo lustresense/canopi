@@ -1,0 +1,224 @@
+
+> canopi-desktop@0.2.0 test
+> node --test src/runtime/*.test.mjs tests/*.test.mjs
+
+TAP version 13
+# Subtest: runtime adapter has real IPC and no fake output
+ok 1 - runtime adapter has real IPC and no fake output
+  ---
+  duration_ms: 1.657566
+  type: 'test'
+  ...
+# Subtest: no arbitrary command execution in Rust bridge
+ok 2 - no arbitrary command execution in Rust bridge
+  ---
+  duration_ms: 1.498625
+  type: 'test'
+  ...
+# Subtest: real RPC-style message events are folded by stable messageId
+ok 3 - real RPC-style message events are folded by stable messageId
+  ---
+  duration_ms: 19.297964
+  type: 'test'
+  ...
+# Subtest: tool and user messages do not masquerade as assistant stream
+ok 4 - tool and user messages do not masquerade as assistant stream
+  ---
+  duration_ms: 54.93057
+  type: 'test'
+  ...
+# Subtest: a second message does not overwrite the first
+ok 5 - a second message does not overwrite the first
+  ---
+  duration_ms: 0.473551
+  type: 'test'
+  ...
+# Subtest: lost stream deltas are repaired using final canonical text
+ok 6 - lost stream deltas are repaired using final canonical text
+  ---
+  duration_ms: 0.278593
+  type: 'test'
+  ...
+# Subtest: state owner gates events by both session and process generation
+ok 7 - state owner gates events by both session and process generation
+  ---
+  duration_ms: 8.118804
+  type: 'test'
+  ...
+# Subtest: Tauri mapped resource path matches Rust engine path
+ok 8 - Tauri mapped resource path matches Rust engine path
+  ---
+  duration_ms: 19.620771
+  type: 'test'
+  ...
+# Subtest: production keeps original CSS and umbrella logo byte-identical to v0.1
+ok 9 - production keeps original CSS and umbrella logo byte-identical to v0.1
+  ---
+  duration_ms: 32.234873
+  type: 'test'
+  ...
+# Subtest: Windows installer exposes an explicit keep/delete-data choice
+ok 10 - Windows installer exposes an explicit keep/delete-data choice
+  ---
+  duration_ms: 21.645202
+  type: 'test'
+  ...
+# Subtest: cleanup is restricted to app-owned roots and refuses reparse points
+ok 11 - cleanup is restricted to app-owned roots and refuses reparse points
+  ---
+  duration_ms: 8.638952
+  type: 'test'
+  ...
+# Subtest: source tree has no placeholder exe masquerading as compiled runtime
+ok 12 - source tree has no placeholder exe masquerading as compiled runtime
+  ---
+  duration_ms: 0.497436
+  type: 'test'
+  ...
+# Subtest: approved original JSX preserved byte-for-byte
+ok 13 - approved original JSX preserved byte-for-byte
+  ---
+  duration_ms: 2.090127
+  type: 'test'
+  ...
+# Subtest: core JSX component layout preserved
+ok 14 - core JSX component layout preserved
+  ---
+  duration_ms: 2.055778
+  type: 'test'
+  ...
+# Subtest: production does not seed preview tasks or simulate model answers
+ok 15 - production does not seed preview tasks or simulate model answers
+  ---
+  duration_ms: 0.947836
+  type: 'test'
+  ...
+# Subtest: TODO status and phase mapping comes from get_state only
+ok 16 - TODO status and phase mapping comes from get_state only
+  ---
+  duration_ms: 1.740889
+  type: 'test'
+  ...
+# Subtest: unknown status is rejected, never relabeled as pending
+ok 17 - unknown status is rejected, never relabeled as pending
+  ---
+  duration_ms: 6.335776
+  type: 'test'
+  ...
+# Subtest: worker registry maps parent and completion
+ok 18 - worker registry maps parent and completion
+  ---
+  duration_ms: 0.616179
+  type: 'test'
+  ...
+# Subtest: assistant message blocks projected to text
+ok 19 - assistant message blocks projected to text
+  ---
+  duration_ms: 0.300408
+  type: 'test'
+  ...
+# Subtest: v1 ready frame passes through
+ok 20 - v1 ready frame passes through
+  ---
+  duration_ms: 3.859252
+  type: 'test'
+  ...
+# Subtest: v2 oversized object reassembles losslessly, including UTF-8
+ok 21 - v2 oversized object reassembles losslessly, including UTF-8
+  ---
+  duration_ms: 0.902615
+  type: 'test'
+  ...
+# Subtest: incomplete chunks are not events and finish fails
+ok 22 - incomplete chunks are not events and finish fails
+  ---
+  duration_ms: 0.672541
+  type: 'test'
+  ...
+# Subtest: interrupting a chunk sequence fails closed
+ok 23 - interrupting a chunk sequence fails closed
+  ---
+  duration_ms: 0.293912
+  type: 'test'
+  ...
+# Subtest: out-of-order index rejected
+ok 24 - out-of-order index rejected
+  ---
+  duration_ms: 1.017709
+  type: 'test'
+  ...
+# Subtest: duplicate chunk rejected
+ok 25 - duplicate chunk rejected
+  ---
+  duration_ms: 0.312373
+  type: 'test'
+  ...
+# Subtest: interleaved chunkId rejected
+ok 26 - interleaved chunkId rejected
+  ---
+  duration_ms: 0.633037
+  type: 'test'
+  ...
+# Subtest: changed declared byteLength rejected
+ok 27 - changed declared byteLength rejected
+  ---
+  duration_ms: 0.306383
+  type: 'test'
+  ...
+# Subtest: tampered base64 rejected
+ok 28 - tampered base64 rejected
+  ---
+  duration_ms: 0.419861
+  type: 'test'
+  ...
+# Subtest: oversized physical frame rejected
+ok 29 - oversized physical frame rejected
+  ---
+  duration_ms: 2.850361
+  type: 'test'
+  ...
+# Subtest: oversized advertised reassembly rejected
+ok 30 - oversized advertised reassembly rejected
+  ---
+  duration_ms: 0.290215
+  type: 'test'
+  ...
+# Subtest: chunk length mismatch rejected
+ok 31 - chunk length mismatch rejected
+  ---
+  duration_ms: 0.46478
+  type: 'test'
+  ...
+# Subtest: non-object logical frame rejected
+ok 32 - non-object logical frame rejected
+  ---
+  duration_ms: 0.114439
+  type: 'test'
+  ...
+# Subtest: UTF8 corruption detected in physical frame
+ok 33 - UTF8 corruption detected in physical frame
+  ---
+  duration_ms: 0.526339
+  type: 'test'
+  ...
+# Subtest: canopi fork modifies the source build recipe, not a downloaded EXE
+ok 34 - canopi fork modifies the source build recipe, not a downloaded EXE
+  ---
+  duration_ms: 7.170416
+  type: 'test'
+  ...
+# Subtest: JSX source contains all required React entrypoints
+ok 35 - JSX source contains all required React entrypoints
+  ---
+  duration_ms: 2.61212
+  type: 'test'
+  ...
+1..35
+# tests 35
+# suites 0
+# pass 35
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 802.576763

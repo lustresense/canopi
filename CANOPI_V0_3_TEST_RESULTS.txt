@@ -1,0 +1,242 @@
+
+> canopi-desktop@0.3.0 test
+> node --test src/runtime/*.test.mjs tests/*.test.mjs
+
+TAP version 13
+# Subtest: runtime adapter has real IPC and no fake output
+ok 1 - runtime adapter has real IPC and no fake output
+  ---
+  duration_ms: 1.020533
+  type: 'test'
+  ...
+# Subtest: no arbitrary command execution in Rust bridge
+ok 2 - no arbitrary command execution in Rust bridge
+  ---
+  duration_ms: 0.889616
+  type: 'test'
+  ...
+# Subtest: real RPC-style message events are folded by stable messageId
+ok 3 - real RPC-style message events are folded by stable messageId
+  ---
+  duration_ms: 1.959873
+  type: 'test'
+  ...
+# Subtest: tool and user messages do not masquerade as assistant stream
+ok 4 - tool and user messages do not masquerade as assistant stream
+  ---
+  duration_ms: 4.755902
+  type: 'test'
+  ...
+# Subtest: a second message does not overwrite the first
+ok 5 - a second message does not overwrite the first
+  ---
+  duration_ms: 0.779731
+  type: 'test'
+  ...
+# Subtest: lost stream deltas are repaired using final canonical text
+ok 6 - lost stream deltas are repaired using final canonical text
+  ---
+  duration_ms: 0.461632
+  type: 'test'
+  ...
+# Subtest: state owner gates events by both session and process generation
+ok 7 - state owner gates events by both session and process generation
+  ---
+  duration_ms: 0.610593
+  type: 'test'
+  ...
+# Subtest: Rust PTY is backed by portable-pty and a real operating-system shell
+ok 8 - Rust PTY is backed by portable-pty and a real operating-system shell
+  ---
+  duration_ms: 2.8358
+  type: 'test'
+  ...
+# Subtest: browser surface has per-agent data directory and no main-window IPC capability
+ok 9 - browser surface has per-agent data directory and no main-window IPC capability
+  ---
+  duration_ms: 1.121203
+  type: 'test'
+  ...
+# Subtest: React Shell and Browser now invoke actual Tauri native adapters, without fake replies
+ok 10 - React Shell and Browser now invoke actual Tauri native adapters, without fake replies
+  ---
+  duration_ms: 0.766514
+  type: 'test'
+  ...
+# Subtest: Tauri mapped resource path matches Rust engine path
+ok 11 - Tauri mapped resource path matches Rust engine path
+  ---
+  duration_ms: 2.51107
+  type: 'test'
+  ...
+# Subtest: production keeps original CSS and umbrella logo byte-identical to v0.1
+ok 12 - production keeps original CSS and umbrella logo byte-identical to v0.1
+  ---
+  duration_ms: 5.175312
+  type: 'test'
+  ...
+# Subtest: Windows installer exposes an explicit keep/delete-data choice
+ok 13 - Windows installer exposes an explicit keep/delete-data choice
+  ---
+  duration_ms: 0.40763
+  type: 'test'
+  ...
+# Subtest: cleanup is restricted to app-owned roots and refuses reparse points
+ok 14 - cleanup is restricted to app-owned roots and refuses reparse points
+  ---
+  duration_ms: 1.054254
+  type: 'test'
+  ...
+# Subtest: source tree has no placeholder exe masquerading as compiled runtime
+ok 15 - source tree has no placeholder exe masquerading as compiled runtime
+  ---
+  duration_ms: 0.27422
+  type: 'test'
+  ...
+# Subtest: approved original JSX preserved byte-for-byte
+ok 16 - approved original JSX preserved byte-for-byte
+  ---
+  duration_ms: 3.504804
+  type: 'test'
+  ...
+# Subtest: core JSX component layout preserved
+ok 17 - core JSX component layout preserved
+  ---
+  duration_ms: 2.766535
+  type: 'test'
+  ...
+# Subtest: production does not seed preview tasks or simulate model answers
+ok 18 - production does not seed preview tasks or simulate model answers
+  ---
+  duration_ms: 1.180498
+  type: 'test'
+  ...
+# Subtest: TODO status and phase mapping comes from get_state only
+ok 19 - TODO status and phase mapping comes from get_state only
+  ---
+  duration_ms: 2.941513
+  type: 'test'
+  ...
+# Subtest: unknown status is rejected, never relabeled as pending
+ok 20 - unknown status is rejected, never relabeled as pending
+  ---
+  duration_ms: 1.294329
+  type: 'test'
+  ...
+# Subtest: worker registry maps parent and completion
+ok 21 - worker registry maps parent and completion
+  ---
+  duration_ms: 0.535268
+  type: 'test'
+  ...
+# Subtest: assistant message blocks projected to text
+ok 22 - assistant message blocks projected to text
+  ---
+  duration_ms: 0.684442
+  type: 'test'
+  ...
+# Subtest: v1 ready frame passes through
+ok 23 - v1 ready frame passes through
+  ---
+  duration_ms: 3.707067
+  type: 'test'
+  ...
+# Subtest: v2 oversized object reassembles losslessly, including UTF-8
+ok 24 - v2 oversized object reassembles losslessly, including UTF-8
+  ---
+  duration_ms: 3.429349
+  type: 'test'
+  ...
+# Subtest: incomplete chunks are not events and finish fails
+ok 25 - incomplete chunks are not events and finish fails
+  ---
+  duration_ms: 0.499029
+  type: 'test'
+  ...
+# Subtest: interrupting a chunk sequence fails closed
+ok 26 - interrupting a chunk sequence fails closed
+  ---
+  duration_ms: 1.024222
+  type: 'test'
+  ...
+# Subtest: out-of-order index rejected
+ok 27 - out-of-order index rejected
+  ---
+  duration_ms: 1.318683
+  type: 'test'
+  ...
+# Subtest: duplicate chunk rejected
+ok 28 - duplicate chunk rejected
+  ---
+  duration_ms: 0.459014
+  type: 'test'
+  ...
+# Subtest: interleaved chunkId rejected
+ok 29 - interleaved chunkId rejected
+  ---
+  duration_ms: 0.538643
+  type: 'test'
+  ...
+# Subtest: changed declared byteLength rejected
+ok 30 - changed declared byteLength rejected
+  ---
+  duration_ms: 0.205792
+  type: 'test'
+  ...
+# Subtest: tampered base64 rejected
+ok 31 - tampered base64 rejected
+  ---
+  duration_ms: 0.815383
+  type: 'test'
+  ...
+# Subtest: oversized physical frame rejected
+ok 32 - oversized physical frame rejected
+  ---
+  duration_ms: 4.070548
+  type: 'test'
+  ...
+# Subtest: oversized advertised reassembly rejected
+ok 33 - oversized advertised reassembly rejected
+  ---
+  duration_ms: 0.268694
+  type: 'test'
+  ...
+# Subtest: chunk length mismatch rejected
+ok 34 - chunk length mismatch rejected
+  ---
+  duration_ms: 0.199382
+  type: 'test'
+  ...
+# Subtest: non-object logical frame rejected
+ok 35 - non-object logical frame rejected
+  ---
+  duration_ms: 0.094856
+  type: 'test'
+  ...
+# Subtest: UTF8 corruption detected in physical frame
+ok 36 - UTF8 corruption detected in physical frame
+  ---
+  duration_ms: 0.339142
+  type: 'test'
+  ...
+# Subtest: canopi fork modifies the source build recipe, not a downloaded EXE
+ok 37 - canopi fork modifies the source build recipe, not a downloaded EXE
+  ---
+  duration_ms: 15.091921
+  type: 'test'
+  ...
+# Subtest: JSX source contains all required React entrypoints
+ok 38 - JSX source contains all required React entrypoints
+  ---
+  duration_ms: 4.758675
+  type: 'test'
+  ...
+1..38
+# tests 38
+# suites 0
+# pass 38
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 429.75561

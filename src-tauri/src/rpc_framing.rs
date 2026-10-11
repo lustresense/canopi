@@ -15,14 +15,51 @@ struct Pending {
     data: Vec<u8>,
 }
 
-#[derive(Default)]
-pub struct Decoder { pending: Option<Pending> }
+pub struct Decoder {
+    pending: Option<Pending>,
+    /// Inbound physical-frame cap: ready `maxFrameBytes`, clamped to the hard cap.
+    max_physical: usize,
+    /// Logical reassembly cap: ready `maxReassembledFrameBytes`, clamped to the hard cap.
+    max_reassembled: usize,
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self { pending: None, max_physical: MAX_PHYSICAL, max_reassembled: MAX_REASSEMBLED }
+    }
+}
+
+fn advertised_limit(ready: &Value, key: &str) -> Result<Option<usize>, String> {
+    match ready.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| format!("RPC ready {key} must be an integer"))?;
+            if n == 0 || n > usize::MAX as u64 { return Err(format!("RPC ready {key} out of range")); }
+            Ok(Some(n as usize))
+        }
+    }
+}
 
 impl Decoder {
+    /// Applies the transport limits advertised by the `ready` frame. Advertised
+    /// values are clamped *down* to the hard caps, so a hostile or buggy engine
+    /// can never widen them. Returns the outbound physical-frame limit.
+    pub fn set_advertised_limits(&mut self, ready: &Value) -> Result<usize, String> {
+        if let Some(physical) = advertised_limit(ready, "maxFrameBytes")? {
+            self.max_physical = physical.min(MAX_PHYSICAL);
+        }
+        if let Some(reassembled) = advertised_limit(ready, "maxReassembledFrameBytes")? {
+            // Clamp only to the hard cap: a smaller advertised value is honored as-is.
+            self.max_reassembled = reassembled.min(MAX_REASSEMBLED);
+        }
+        Ok(self.max_physical)
+    }
     /// `physical` is the frame's UTF-8 bytes without the newline terminator.
     /// Ok(None) means an incomplete v2 chunk sequence, NOT an empty event.
     pub fn push(&mut self, physical: &[u8]) -> Result<Option<Value>, String> {
-        if physical.len() + 1 > MAX_PHYSICAL { return Err("RPC physical frame exceeded 1 MiB".into()); }
+        if physical.len() + 1 > self.max_physical {
+            return Err(format!("RPC physical frame exceeded {} bytes", self.max_physical));
+        }
         let v: Value = serde_json::from_slice(physical).map_err(|_| "Malformed RPC JSON frame".to_string())?;
         if !v.is_object() { return Err("RPC object frame required".into()); }
         if v.get("type").and_then(Value::as_str) != Some("rpc_chunk") {
@@ -34,7 +71,7 @@ impl Decoder {
         let count = v.get("count").and_then(Value::as_u64).ok_or("RPC count invalid")? as usize;
         let length = v.get("byteLength").and_then(Value::as_u64).ok_or("RPC byteLength invalid")? as usize;
         let data = v.get("data").and_then(Value::as_str).ok_or("RPC base64 data missing")?;
-        if id.is_empty() || id.len() > 128 || count == 0 || count > MAX_CHUNKS || index >= count || length == 0 || length > MAX_REASSEMBLED {
+        if id.is_empty() || id.len() > 128 || count == 0 || count > MAX_CHUNKS || index >= count || length == 0 || length > self.max_reassembled {
             return Err("RPC invalid chunk envelope".into());
         }
         let decoded = STANDARD.decode(data).map_err(|_| "RPC invalid chunk base64".to_string())?;
@@ -88,5 +125,47 @@ mod tests {
         d.push(a.to_string().as_bytes()).unwrap();
         assert!(d.push(br#"{"type":"response"}"#).is_err());
         assert!(d.finish().is_err());
+    }
+    #[test]
+    fn invalid_utf8_rejected() {
+        let mut d = Decoder::default();
+        assert!(d.push(b"{\"type\":\"\xff\"}").is_err());
+    }
+    #[test]
+    fn advertised_smaller_physical_limit_enforced() {
+        let mut d = Decoder::default();
+        let limit = d.set_advertised_limits(&json!({"maxFrameBytes":64})).unwrap();
+        assert_eq!(limit, 64);
+        let oversized = format!("{{\"type\":\"response\",\"pad\":\"{}\"}}", "a".repeat(80));
+        assert!(d.push(oversized.as_bytes()).is_err());
+        assert!(d.push(br#"{"type":"ready"}"#).is_ok());
+    }
+    #[test]
+    fn advertised_limits_never_widen_hard_caps() {
+        let mut d = Decoder::default();
+        let limit = d.set_advertised_limits(&json!({"maxFrameBytes": 4_294_967_296u64, "maxReassembledFrameBytes": 4_294_967_296u64})).unwrap();
+        assert_eq!(limit, MAX_PHYSICAL);
+        let mut huge = Vec::with_capacity(MAX_PHYSICAL);
+        huge.extend_from_slice(b"{\"type\":\"response\"");
+        huge.resize(MAX_PHYSICAL, b' ');
+        assert!(d.push(&huge).is_err());
+        // Reassembly cap stays at the hard 64 MiB bound regardless of claims.
+        assert!(d.set_advertised_limits(&json!({"maxReassembledFrameBytes": 0u64})).is_err());
+    }
+    #[test]
+    fn advertised_limits_must_be_integers() {
+        let mut d = Decoder::default();
+        assert!(d.set_advertised_limits(&json!({"maxFrameBytes":"1MiB"})).is_err());
+        assert!(d.set_advertised_limits(&json!({"maxReassembledFrameBytes":1.5})).is_err());
+        // Absent fields keep the hard caps.
+        assert_eq!(d.set_advertised_limits(&json!({})).unwrap(), MAX_PHYSICAL);
+    }
+    #[test]
+    fn advertised_smaller_reassembled_limit_enforced() {
+        let mut d = Decoder::default();
+        d.set_advertised_limits(&json!({"maxReassembledFrameBytes":16})).unwrap();
+        let bytes = json!({"type":"response","data":{"pad":"abcdefghijklmnopqrstuvwxyz"}}).to_string().into_bytes();
+        let chunk = json!({"type":"rpc_chunk","chunkId":"t","index":0,"count":1,"byteLength":bytes.len(),"data":STANDARD.encode(&bytes)});
+        assert!(d.push(chunk.to_string().as_bytes()).is_err());
     }
 }

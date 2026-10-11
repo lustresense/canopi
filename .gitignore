@@ -3,8 +3,12 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 _upstream/
+upstream/oh-my-pi/
+upstream/toolchain/
 *.log
 .DS_Store
+__pycache__/
+*.pyc
 release/
 ENGINE-PROVENANCE.json
 src-tauri/resources/engine/*.exe

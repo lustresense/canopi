@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,existsSync} from 'node:fs';
-import {createHash} from 'node:crypto';
+import {readFileSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+import {execFileSync} from 'node:child_process';
 const read=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8');
 test('Tauri mapped resource path matches Rust engine path',()=>{
   const c=JSON.parse(read('src-tauri/tauri.conf.json'));
   assert.equal(c.productName,'canoPi');
+  assert.equal(c.mainBinaryName,'canoPi');
   assert.equal(c.identifier,'app.canopi.desktop');
   assert.equal(c.bundle.resources['resources/engine/cnp-engine.exe'],'engine/cnp-engine.exe');
   assert.match(read('src-tauri/src/main.rs'),/join\("engine"\)\.join\(name\)/);
@@ -25,6 +27,7 @@ test('Windows installer exposes an explicit keep/delete-data choice',()=>{
   assert.equal(conf.bundle.windows.nsis.installerHooks,'./windows/hooks.nsh');
   const hooks=read('src-tauri/windows/hooks.nsh');
   assert.match(hooks,/StrCpy \$R8 "keep"/);
+  assert.match(hooks,/IfSilent canopi_pre_done/);
   assert.match(hooks,/MB_DEFBUTTON2/);
   assert.match(hooks,/canopi_pre_delete/);
   assert.match(hooks,/canopi-cleanup\.ps1/);
@@ -37,7 +40,11 @@ test('cleanup is restricted to app-owned roots and refuses reparse points',()=>{
   assert.doesNotMatch(ps, /\.omp[\\/]/);
   assert.doesNotMatch(ps, /\$env:USERPROFILE\s*\|\s*Remove-Item/);
 });
-test('source tree has no placeholder exe masquerading as compiled runtime',()=>{
-  assert.ok(!existsSync(new URL('../src-tauri/resources/engine/cnp-engine.exe',import.meta.url)));
-  assert.ok(!existsSync(new URL('../dist-artifacts/canoPi.exe',import.meta.url)));
+test('compiled runtime artifacts are never committed to the source tree',()=>{
+  // A genuine release build transiently stages the engine and installer output;
+  // git-tracked-ness (not filesystem presence) proves the source tree is clean.
+  const root=fileURLToPath(new URL('..',import.meta.url));
+  const tracked=rel=>execFileSync('git',['ls-files','--',rel],{cwd:root,encoding:'utf8'}).trim();
+  assert.equal(tracked('src-tauri/resources/engine/cnp-engine.exe'),'','cnp-engine.exe must not be git-tracked');
+  assert.equal(tracked('dist-artifacts/canoPi.exe'),'','installer artifact must not be git-tracked');
 });

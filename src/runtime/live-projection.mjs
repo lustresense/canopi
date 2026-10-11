@@ -12,8 +12,14 @@ export function projectAssistantFrame(messages, frame) {
   const idx = messages.findIndex(m => m.id === id);
   const current = idx >= 0 ? messages[idx] : { id, role:'asst', text:'', native:true };
   let text = current.text;
-  if (frame.type === 'message_update' && frame.assistantMessageEvent?.type === 'text_delta') {
-    text += String(frame.assistantMessageEvent.delta ?? '');
+  if (frame.type === 'message_update') {
+    // "full" projection carries the accumulated message; "delta" projection
+    // carries only the increment. Prefer canonical content when present.
+    const full = textFromMessage(frame.message);
+    if (full) text = full;
+    else if (frame.assistantMessageEvent?.type === 'text_delta') {
+      text += String(frame.assistantMessageEvent.delta ?? '');
+    }
   }
   if (frame.type === 'message_end') text = textFromMessage(frame.message);
   if (idx >= 0 && current.text === text) return messages;

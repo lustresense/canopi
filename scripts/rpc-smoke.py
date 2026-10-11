@@ -18,6 +18,25 @@ def smoke(exe):
         root = Path(temp)
         (root / "project").mkdir()
         (root / "agent").mkdir()
+        # The engine refuses to start with an empty model catalog (rc=1 before
+        # ready). Stage a zero-cost local fixture provider so this transport
+        # smoke runs on a clean profile. No provider call is ever made.
+        (root / "agent" / "models.yml").write_text(
+            "providers:\n"
+            "  canopi-smoke:\n"
+            "    baseUrl: http://127.0.0.1:9/v1\n"
+            "    apiKey: canopi-smoke-not-a-real-key\n"
+            "    api: openai-completions\n"
+            "    models:\n"
+            "      - id: canopi-smoke-model\n"
+            "        name: canoPi smoke model\n"
+            "        api: openai-completions\n"
+            "        input: [text]\n"
+            "        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }\n"
+            "        contextWindow: 8000\n"
+            "        maxTokens: 1000\n",
+            encoding="utf-8",
+        )
         env = os.environ.copy()
         for key in ("OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_FILES", "PI_CODING_AGENT_SESSION_DIR"):
             env.pop(key, None)

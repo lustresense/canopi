@@ -21,13 +21,21 @@ export function normalizeTodos(state) {
 }
 export function normalizeWorkers(data) {
   const list = Array.isArray(data) ? data : (data?.subagents || data?.agents || []);
-  return Array.isArray(list) ? list.map((a, i) => ({
-    id: String(a.subagentId || a.id || a.agentId || `worker-${i}`),
-    name: String(a.name || a.agentName || a.taskName || a.label || `Worker ${i + 1}`),
-    parent: String(a.parentSubagentId || a.parentId || 'main'),
-    state: /done|complete|success/.test(String(a.status || a.state || '').toLowerCase()) ? 'completed' :
-      /fail|error/.test(String(a.status || a.state || '').toLowerCase()) ? 'failed' :
-      /wait|idle/.test(String(a.status || a.state || '').toLowerCase()) ? 'waiting' : 'running',
-    activity: String(a.task || a.description || a.status || a.state || 'Working')
-  })) : [];
+  return Array.isArray(list) ? list.map((a, i) => {
+    const progress = a?.progress && typeof a.progress === 'object' ? a.progress : {};
+    // RpcSubagentSnapshot.status and AgentProgress.status: pending|running|completed|failed|aborted.
+    const raw = String(a?.status ?? a?.state ?? progress.status ?? '');
+    const state = /complete|success/.test(raw.toLowerCase()) ? 'completed' :
+      /fail|error/.test(raw.toLowerCase()) ? 'failed' :
+      /abort/.test(raw.toLowerCase()) ? 'stopped' :
+      /pending|queue/.test(raw.toLowerCase()) ? 'idle' :
+      /wait|idle/.test(raw.toLowerCase()) ? 'waiting' : 'running';
+    return {
+      id: String(a?.subagentId || a?.id || a?.agentId || progress.id || `worker-${i}`),
+      name: String(a?.name || a?.description || a?.taskName || a?.agentName || a?.agent || a?.label || `Worker ${i + 1}`),
+      parent: String(a?.parentSubagentId || a?.parentId || 'main'),
+      state,
+      activity: String(a?.task || a?.assignment || a?.description || (progress.currentTool ? `Running ${progress.currentTool}` : '') || a?.status || a?.state || 'Working')
+    };
+  }) : [];
 }

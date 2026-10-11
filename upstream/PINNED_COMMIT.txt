@@ -2,5 +2,5 @@ Repository: https://github.com/can1357/oh-my-pi.git
 Release: v18.6.1 (2026-10-04)
 Commit: 2a2c6dcbbb558c0f8145f67f28b3370984f2bf60
 Source: https://github.com/can1357/oh-my-pi/commit/2a2c6dcbbb558c0f8145f67f28b3370984f2bf60
-Status: verified via published GitHub source pages, but actual local clone and build could not run here due to DNS/toolchain limits.
+Status: VERIFIED locally 2026-10-11. Clone at upstream/oh-my-pi checked out to this SHA; patch applied; cnp-engine.exe built from source (sha256 3c4866b6362cf7886fa9a44494ec9d054885c5d3b5e85e6c34b6bfdf24ae3f6c, 251200512 bytes). Evidence: `--version` omp/18.6.1, `--smoke-test` ok, scripts/rpc-smoke.py PASS (ready/negotiate v2/open_session/get_state), ENGINE-PROVENANCE.json schema 2 exit 0. Build used the documented GNU-toolchain fallback (no VS C++ Build Tools on this runner): nightly-2026-08-12-x86_64-pc-windows-gnu plus a build-time-only libnode placeholder in upstream/toolchain; the produced pi_natives addon imports only system DLLs (no node.dll).
 CI behavior: clone and checkout this SHA, apply tracked build-source patch, build cnp-engine.exe from source, smoke-test the resulting executable, bundle with Tauri NSIS. It NEVER downloads and renames an existing OMP release executable.

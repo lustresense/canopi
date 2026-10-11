@@ -7,7 +7,9 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, creat
 import { gsap } from 'gsap';
 import { pickProject, runtimeInfo, startRuntime, sendRpc, answerUi, watchFrames, textFromMessage, normalizeTodos, normalizeWorkers } from '../runtime/omp.js';
 import { projectAssistantFrame } from '../runtime/live-projection.mjs';
-import { createTerminal, writeTerminal, resizeTerminal, closeTerminal, watchTerminal, openAgentBrowser, closeAgentBrowser, previewOmpModels, importOmpModels } from '../runtime/native.js';
+import { parseWorkspace, serializeWorkspace, WORKSPACE_KEY, WORKSPACE_KEY_V1, UI_DEFAULTS } from '../runtime/workspace.mjs';
+import { subagentFrameId, subagentFrameEvent, workerStateFromStatus, toolCallIdOf } from '../runtime/frame-model.mjs';
+import { createTerminal, writeTerminal, resizeTerminal, closeTerminal, watchTerminal, listTerminals, openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels } from '../runtime/native.js';
 import {
   Folder, FolderOpen, SquarePen, Search, Kanban, Globe, Terminal, Settings, Sun, Moon, Menu, X, Plus,
   ChevronRight, ChevronDown, ChevronUp, Columns2, Maximize2, Minimize2, ArrowLeft, ArrowRight, ArrowUp,
@@ -166,8 +168,10 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
 .cp .transcript:focus-visible{outline-offset:-2px}
 .cp .msg{max-width:74ch;min-width:0}
 .cp .msg .body{white-space:pre-wrap;word-break:break-word}
-.cp .msg.user{align-self:flex-start;background:var(--glass-2);border:1px solid var(--glass-line);padding:9px 15px;border-radius:16px 16px 16px 5px;box-shadow:inset 0 1px 0 var(--glass-hi)}
-.cp .msg.user .body{font:400 19px/1.45 var(--font-serif)}
+.cp .msg.user{align-self:flex-start;background:rgba(238,247,249,.88);border:1px solid rgba(140,205,213,.42);padding:9px 15px;border-radius:16px 16px 16px 5px;box-shadow:0 8px 24px rgba(4,10,13,.26),inset 0 1px 0 rgba(255,255,255,.85);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+.cp .msg.user .body{font:400 19px/1.45 var(--font-serif);color:#10242B}
+.cp[data-theme="light"] .msg.user{background:rgba(255,255,255,.94);border:1px solid rgba(71,157,170,.28);box-shadow:0 6px 18px rgba(25,51,61,.08),inset 0 1px 0 #ffffff}
+.cp[data-theme="light"] .msg.user .body{color:#142830}
 .cp .msg.asst .body{font:400 14px/1.7 var(--font-sans);color:var(--text)}
 .cp .msg.notice{align-self:center;color:var(--text-3);font-size:12.5px;border:1px dashed var(--glass-line);border-radius:999px;padding:3px 12px}
 .cp details.think{color:var(--text-3);font-size:13px;padding-left:2px}
@@ -474,8 +478,6 @@ const STATE_META = {
 };
 const COLS = [['pending', 'To do'], ['in_progress', 'In progress'], ['blocked', 'Blocked'], ['completed', 'Done'], ['abandoned', 'Cancelled']];
 const COLNAME = Object.fromEntries(COLS);
-const THINK = ['Auto', 'Low', 'Medium', 'High'];
-const ROLES = ['default', 'smol', 'slow', 'plan', 'commit', 'vision', 'task', 'advisor', 'tiny'];
 
 const STARTERS = ['Fix the session timeout bug', 'Review my uncommitted changes', 'Split the docs update to a worker'];
 
@@ -507,23 +509,15 @@ const SECRETS = { 6: 'Udah, jangan dipencet terus. Ketik aja kerjaannya.', 12: '
 
 /* ================================================================ seed data */
 const U = text => ({ id: mid(), role: 'user', text });
-const A_ = text => ({ id: mid(), role: 'asst', text });
-const TH = text => ({ id: mid(), role: 'think', text });
-const T = (tool, arg, status = 'ok', out = '', meta = '') => ({ id: mid(), role: 'tool', tool, arg, status, out, meta });
-const W = aid => ({ id: mid(), role: 'worker', aid });
-const AP = (tool, arg, status = 'pending') => ({ id: mid(), role: 'approval', tool, arg, status });
 const N = text => ({ id: mid(), role: 'notice', text });
 const mkAgent = (id, name, state, activity, extra = {}) => ({ id, name, state, activity, unread: false, parent: id === 'main' ? null : 'main', flag: null, script: [], ...extra });
-const mkSurface = (sid, owner, url, state = 'ready') => ({
-  owner: sid + '/' + owner, state, url, history: url ? [url] : [], hi: url ? 0 : -1, store: { cookie: null }, err: null,
-  perms: { clipboard: 'ask', camera: 'blocked', microphone: 'blocked', geolocation: 'blocked', downloads: 'ask', popups: 'blocked' },
-  audit: [], activity: [], readonly: false, lastUsed: Date.now()
-});
 const tr = (tool, arg, status, note) => ({ t: clock(), tool, arg, status, note: note || '' });
 const makeSession = (id, name, project) => ({
   id, name, project, unread: 0, revision: 1, todoAt: Date.now(), seen: true,
   agents: { main: mkAgent('main', 'Main agent', 'idle', 'Waiting for your next message') }, order: ['main'],
-  threads: { main: [] }, traces: { main: [] }, todo: [], links: {}, browsers: {}, shells: []
+  threads: { main: [] }, traces: { main: [] }, todo: [], links: {}, browsers: {}, shells: [],
+  /* Per-session runtime catalogs; never persisted, rehydrated from the engine. */
+  models: [], commands: [], thinkingLevels: null, thinkingLevel: null, context: null, liveModel: null
 });
 
 /* ================================================================ small pure helpers */
@@ -538,16 +532,15 @@ const TOOL_META = {
   todo: [ListChecks, 'Updating tasks', 'Updated tasks'], browser: [Globe, 'Browsing', 'Browsed']
 };
 function loadWorkspace() {
+  const empty = { projects: [], sessions: {}, ui: { ...UI_DEFAULTS, collapsed: {}, dock: { ...UI_DEFAULTS.dock } } };
   try {
-    const saved = JSON.parse(localStorage.getItem('canopi.workspace.v1') || '{}');
-    const projects = Array.isArray(saved.projects) ? saved.projects.filter(p => typeof p.path === 'string' && p.path) : [];
+    if (typeof localStorage === 'undefined') return empty;
+    const stored = localStorage.getItem(WORKSPACE_KEY) || localStorage.getItem(WORKSPACE_KEY_V1);
+    const parsed = parseWorkspace(stored);
     const sessions = {};
-    for (const x of (saved.sessions || [])) {
-      if (!projects.some(p => p.id === x.project)) continue;
-      sessions[x.id] = makeSession(x.id, x.name, x.project);
-    }
-    return { projects, sessions };
-  } catch { return { projects: [], sessions: {} }; }
+    for (const meta of parsed.sessions) sessions[meta.id] = makeSession(meta.id, meta.name, meta.project);
+    return { projects: parsed.projects, sessions, ui: parsed.ui };
+  } catch { return empty; }
 }
 
 /* ================================================================ context + tiny components */
@@ -603,7 +596,16 @@ export default function CanoPi() {
   const dbRef = useRef(db);
   const mutate = useCallback(fn => { const n = JSON.parse(JSON.stringify(dbRef.current)); fn(n); dbRef.current = n; setDb(n); }, []);
 
-  const [theme, setTheme] = useState('dark');
+  /* Light path-copy update for hot streaming paths (assistant deltas, PTY
+     output): avoids deep-cloning the whole workspace on every token. */
+  const updateSessionLight = useCallback((sidx, fn) => {
+    const cur = dbRef.current; const s = cur.sessions[sidx]; if (!s) return;
+    const next = fn(s); if (next === s) return;
+    const n = { ...cur, sessions: { ...cur.sessions, [sidx]: next } };
+    dbRef.current = n; setDb(n);
+  }, []);
+
+  const [theme, setTheme] = useState(() => (db.ui.theme === 'light' ? 'light' : 'dark'));
   const [sid, setSid] = useState(null);                 // null = Home
   const [view, setViewS] = useState('conv');
   const [insp, setInsp] = useState(null);
@@ -616,11 +618,8 @@ export default function CanoPi() {
     if (forSession) setConnectionStatus(x=>({...x,[forSession]:status}));
     else setHomeConn(status);
   };
-  const [availableModels, setAvailableModels] = useState([]);
-  const [runtimeCommands, setRuntimeCommands] = useState([]);
   const [runtimeDialog, setRuntimeDialog] = useState(null);
-  const [liveModel, setLiveModel] = useState(null);
-  const [dock, setDock] = useState({ open: true, expanded: false, h: 216, split: false, sel: ['trace:main', 'trace:main'] });
+  const [dock, setDock] = useState({ ...UI_DEFAULTS.dock, ...db.ui.dock, sel: ['trace:main', 'trace:main'] });
   const [dragging, setDragging] = useState(false);
   const [workH, setWorkH] = useState(720);
   const [mode, setMode] = useState('agent');
@@ -630,28 +629,41 @@ export default function CanoPi() {
   const [selTask, setSelTask] = useState(null);
   const [colTab, setColTab] = useState('in_progress');
   const [drafts, setDrafts] = useState({});
-  const [settings, setSettings] = useState({ roles: { default: "No model selected" },
-    tools: { read: true, write: true, edit: true, grep: true, glob: true, bash: true, lsp: true, task: true, todo: true, web_search: true, ast_edit: false, eval: false },
-    mcp: { 'docs-search': true, linear: false }, rules: { 'box-leak': true, 'no-any': true }, skills: { 'review-checklist': true, 'migration-notes': false },
-    mem: 'Local', projmem: true, fallback: true, think: 'Auto', approval: 'Ask for destructive tools' });
   const [railOpen, setRailOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState({});
-  const [homeProject, setHomeProject] = useState(() => { try { return JSON.parse(localStorage.getItem('canopi.workspace.v1') || '{}').projects?.[0]?.id || ''; } catch { return ''; } });
+  const [collapsed, setCollapsed] = useState(() => { const c = { ...db.ui.collapsed }; const last = db.sessions[db.ui.lastSessionId]; if (last) c[last.project] = false; return c; });
+  const [homeProject, setHomeProject] = useState(() => db.ui.homeProjectId || db.projects[0]?.id || '');
   const [drawer, setDrawer] = useState(null);
   const [palette, setPalette] = useState(false);
   const [confirmS, setConfirmS] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [stale, setStale] = useState(0);
 
+  const persistTimer = useRef(null);
   useEffect(() => {
-    localStorage.setItem('canopi.workspace.v1', JSON.stringify({ projects: db.projects, sessions: Object.values(db.sessions).map(({id,name,project})=>({id,name,project})) }));
-  }, [db]);
+    if (typeof localStorage === 'undefined') return undefined;
+    clearTimeout(persistTimer.current);
+    persistTimer.current = setTimeout(() => {
+      try {
+        localStorage.setItem(WORKSPACE_KEY, serializeWorkspace(dbRef.current, {
+          lastSessionId: uiRef.current.sid, homeProjectId: homeProject, theme, view, collapsed,
+          dock: { open: dock.open, expanded: dock.expanded, h: dock.h, split: dock.split }
+        }));
+        localStorage.removeItem(WORKSPACE_KEY_V1); // migrated to the v2 schema
+      } catch { /* Storage unavailable/full: the app keeps running without persistence. */ }
+    }, 300);
+    return () => clearTimeout(persistTimer.current);
+  }, [db, theme, view, collapsed, dock, homeProject]);
   useEffect(() => { runtimeInfo().then(x => { setEngine(x); setConn(x.available ? 'idle' : 'disconnected'); }).catch(e => { setEngine({available:false,error:String(e)}); setConn('disconnected'); }); }, []);
 
-  const appRef = useRef(null), workRef = useRef(null), fileRef = useRef(null), scrollRef = useRef({}), busyRef = useRef({}), logic = useRef({}), pendingSync = useRef(new Map());
+  const appRef = useRef(null), workRef = useRef(null), scrollRef = useRef({}), busyRef = useRef({}), logic = useRef({}), pendingSync = useRef(new Map());
   const uiRef = useRef({}); uiRef.current = { sid, view, insp, inspTab, conn, selTask, mode };
 
   const ss = sid && db.sessions[sid] ? db.sessions[sid] : null;
+  const availableModels = ss ? ss.models : [];
+  const runtimeCommands = ss ? ss.commands : [];
+  const liveModel = ss ? ss.liveModel : null;
+  const thinkingLevels = ss ? ss.thinkingLevels : null;
+  const thinkingLevel = ss ? ss.thinkingLevel : null;
   const eff = a => (conn === 'disconnected' ? 'disconnected' : a.state);
   const shells = ss ? ss.shells : [];
   const curShellId = shells.find(s => s.id === shellId) ? shellId : (shells[0] && shells[0].id) || null;
@@ -672,7 +684,6 @@ export default function CanoPi() {
   const toast = useCallback(msg => { const id = mid(); setToasts(t => [...t.slice(-2), { id, msg }]); setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), RM ? 1200 : 3400); }, []);
   const confirm = useCallback(o => new Promise(res => setConfirmS({ ...o, res })), []);
   const setDraft = useCallback((k, v) => setDrafts(d => ({ ...d, [k]: v })), []);
-  const setSet = patch => setSettings(s => ({ ...s, ...patch }));
   const importProviderDefinitions = async () => {
     if(uiRef.current.sid){toast('Return Home before importing provider definitions.');return;}
     try {
@@ -701,14 +712,7 @@ export default function CanoPi() {
   const patchMsg = useCallback((sidx, tid, id, patch) => mutate(d => { const s = d.sessions[sidx]; const m = s && s.threads[tid] && s.threads[tid].find(x => x.id === id); if (m) Object.assign(m, patch); }), [mutate]);
   const addTrace = useCallback((sidx, owner, en) => mutate(d => { const s = d.sessions[sidx]; if (!s) return; (s.traces[owner] = s.traces[owner] || []).push(en); }), [mutate]);
   const setAgent = useCallback((sidx, aid, patch) => mutate(d => { const s = d.sessions[sidx]; if (s && s.agents[aid]) Object.assign(s.agents[aid], patch); }), [mutate]);
-  const withSurf = useCallback((sidx, aid, fn) => mutate(d => { const s = d.sessions[sidx]; const b = s && s.browsers[aid]; if (b) fn(b); }), [mutate]);
-  const stream = async () => { throw new Error('Simulated stream disabled'); };
 
-  const gate = useCallback((sidx, aid, fn) => {
-    const s = dbRef.current.sessions[sidx];
-    if (!s || (aid && !s.agents[aid])) { setStale(n => n + 1); toast('Ignored a late event for an unknown session or worker'); return false; }
-    fn(s); return true;
-  }, [toast]);
 
   /* ---------- OMP TODO (read-only projection; the "main agent" replaces the whole snapshot) ---------- */
   const setTodos = (sidx, phases, reason) => {
@@ -736,7 +740,7 @@ export default function CanoPi() {
     setShellId(s.shells[0] ? s.shells[0].id : null);
     const project=dbRef.current.projects.find(p=>p.id===s.project);
     if(!project || !engine.available) { toast(engine.error||'Bundled OMP unavailable'); return; }
-    try { const opened=await startRuntime(id,project.path); setConn('connected',id); if(opened.state) applyRuntimeState(id,opened.state); else await refreshState(id); await sendRpc(id,{type:'set_subagent_subscription',level:'events'}).catch(()=>{}); await refreshHistory(id); await refreshModels(id); await refreshCommands(id); await refreshWorkers(id); }
+    try { const opened=await startRuntime(id,project.path); setConn('connected',id); if(opened.state) applyRuntimeState(id,opened.state); else await refreshState(id); await bootSession(id); await refreshHistory(id); }
     catch(e) { setConn('disconnected',id); toast('Session failed: '+String(e.message||e)); }
   };
   const setView = v => { setViewS(v); closeRail(); };
@@ -761,7 +765,6 @@ export default function CanoPi() {
       toast('Opened ' + name);
     } catch (e) { toast(String(e.message || e)); }
   };
-  const onFolderPicked = () => {}; // browser file picker intentionally unused
   const startSession = async (text, projectId) => {
     const t = text.trim();
     if (t.split(/\s+/)[0] === '/share') { toast('/share is intentionally excluded from canoPi'); return; } const project = dbRef.current.projects.find(p => p.id === projectId);
@@ -775,9 +778,7 @@ export default function CanoPi() {
       const opened = await startRuntime(id, project.path);
       setConn('connected',id);
       if (opened.state) applyRuntimeState(id, opened.state);
-      await sendRpc(id,{type:'set_subagent_subscription',level:'events'}).catch(()=>{});
-      await refreshModels(id);
-      await refreshCommands(id);
+      await bootSession(id);
       pushMsg(id, 'main', U(t));
       await mainReply(id, t);
     } catch (e) { setConn('disconnected',id); setAgent(id,'main',{state:'failed',activity:'Runtime failed to start'}); pushMsg(id,'main',N('Engine error: '+String(e.message||e))); toast('Cannot start cnp: '+String(e.message||e)); }
@@ -785,33 +786,41 @@ export default function CanoPi() {
 
   /* Native adapters. Browser surfaces are real per-agent WebView2 windows; tool-driven
      computer/browser automation is intentionally not misrepresented as implemented. */
-  const unsupported = what => toast(what + ' is not supported by the native adapter yet.');
-  const surfaceNav = async (sidx,aid,url) => {
-    try { await openAgentBrowser(sidx,aid,url); } catch(e) { toast('Browser error: '+String(e)); }
-  };
-  const surfaceOpen = surfaceNav;
-  const signIn = async () => unsupported('Automated browser sign-in');
-  const replayRun = async () => unsupported('Agent-driven browser replay');
   const terminalDecoders = useRef(new Map());
   const terminalOutput = useRef(new Map());
+  const terminalSeq = useRef(new Map());
   useEffect(()=>{
     let stop=()=>{}; let mounted=true;
     watchTerminal(
       p=>{
         const key=p.sessionKey+'/'+p.terminalId;
+        if (p.replay) { /* replacement payload: full bounded scrollback */
+          terminalOutput.current.set(key,''); terminalDecoders.current.delete(key); terminalSeq.current.delete(key);
+        } else if (Number.isSafeInteger(p.seq)) {
+          const last=terminalSeq.current.get(key);
+          if (last!=null && p.seq<=last) return; /* duplicate or reordered chunk */
+          terminalSeq.current.set(key,p.seq);
+        }
         let decoder=terminalDecoders.current.get(key);
         if(!decoder){decoder=new TextDecoder('utf-8');terminalDecoders.current.set(key,decoder);}
         const bytes=Uint8Array.from(atob(p.dataBase64),c=>c.charCodeAt(0));
-        const output=decoder.decode(bytes,{stream:true});
-        if(!output)return;
-        terminalOutput.current.set(key,(terminalOutput.current.get(key)||'').concat(output).slice(-120000));
-        mutate(d=>{const s=d.sessions[p.sessionKey];const sh=s?.shells.find(x=>x.id===p.terminalId);if(!sh)return;
-          sh.lines=[{c:'',t:terminalOutput.current.get(key)}];});
+        const output=decoder.decode(bytes,{stream:!p.replay});
+        if(!output && !p.replay)return;
+        terminalOutput.current.set(key,(terminalOutput.current.get(key)||'').concat(output).slice(-262144));
+        const text=terminalOutput.current.get(key);
+        updateSessionLight(p.sessionKey,s=>{const idx=s.shells.findIndex(x=>x.id===p.terminalId);if(idx<0)return s;
+          const shells=s.shells.slice();shells[idx]={...shells[idx],lines:[{c:'',t:text}]};return {...s,shells};});
       },
-      p=>mutate(d=>{const sh=d.sessions[p.sessionKey]?.shells.find(x=>x.id===p.terminalId);if(sh)sh.exited=0;})
+      p=>{
+        const key=p.sessionKey+'/'+p.terminalId;
+        terminalDecoders.current.delete(key);terminalOutput.current.delete(key);terminalSeq.current.delete(key);
+        const exit=Number.isInteger(p.exitCode)?p.exitCode:'ended';
+        updateSessionLight(p.sessionKey,s=>{const idx=s.shells.findIndex(x=>x.id===p.terminalId);if(idx<0)return s;
+          const shells=s.shells.slice();shells[idx]={...shells[idx],exited:exit};return {...s,shells};});
+      }
     ).then(f=>{if(mounted)stop=f;else f();}).catch(e=>toast('Native PTY listener: '+String(e)));
     return ()=>{mounted=false;stop();};
-  },[mutate,toast]);
+  },[updateSessionLight,toast]);
   const shellExec = async (sidx,shid,raw) => {
     try { await writeTerminal(sidx,shid,raw+'\r'); }
     catch(e){toast('Terminal write: '+String(e));}
@@ -832,17 +841,17 @@ export default function CanoPi() {
     try{await closeTerminal(sx,id); mutate(d=>{const s=d.sessions[sx];if(s)s.shells=s.shells.filter(sh=>sh.id!==id);});}
     catch(e){toast('Close terminal: '+String(e));}
   };
-  let AUD=useRef(0);
 
 
   /* Actual OMP RPC flow. Acknowledgement is not completion; frames carry the reply. */
   const applyRuntimeState = (sidx, state) => {
     if (!state) return;
     setTodos(sidx, normalizeTodos(state));
-    if (uiRef.current.sid===sidx && state.model?.provider && state.model?.id) {
-      setLiveModel({provider:state.model.provider, modelId:state.model.id});
-      setSettings(x=>({...x,roles:{...x.roles,default:state.model.provider+'/'+state.model.id},think:state.thinkingLevel || x.think}));
-    }
+    const model = state.model?.provider && state.model?.id ? { provider: state.model.provider, modelId: state.model.id } : null;
+    mutate(x => { const s = x.sessions[sidx]; if (!s) return;
+      if (model) s.liveModel = model;
+      if (state.thinkingLevel !== undefined) s.thinkingLevel = state.thinkingLevel;
+      s.context = state.contextUsage || null; });
     setAgent(sidx,'main',{state:state.isStreaming?'running':'idle',activity:state.isStreaming?'Generating':'Ready'});
   };
   const refreshState = async sidx => {
@@ -864,6 +873,15 @@ export default function CanoPi() {
     const timer = setTimeout(()=>{pendingSync.current.delete(sidx); void refreshState(sidx);},ms);
     pendingSync.current.set(sidx,timer);
   };
+  const queueWorkersSync = (sidx, ms=400) => {
+    const key='workers:'+sidx;
+    if (busyRef.current[key]) { busyRef.current[key+':dirty']=true; return; }
+    busyRef.current[key]=true;
+    setTimeout(()=>{ busyRef.current[key]=false;
+      if (busyRef.current[key+':dirty']) { busyRef.current[key+':dirty']=false; queueWorkersSync(sidx,ms); return; }
+      void refreshWorkers(sidx);
+    }, ms);
+  };
   const refreshHistory = async sidx => {
     if(dbRef.current.sessions[sidx]?.threads.main.length) return;
     try {
@@ -882,14 +900,51 @@ export default function CanoPi() {
   };
   const refreshCommands = async sidx => {
     try { const d=await sendRpc(sidx,{type:'get_available_commands'});
-      setRuntimeCommands((d?.commands||[]).filter(c=>c.name && c.name.replace(/^\//,'')!=='share').map(c=>({n:c.name.startsWith('/')?c.name:'/'+c.name,d:c.description||c.source||'',ok:true})));
-    } catch { setRuntimeCommands([]); }
+      const commands=(d?.commands||[]).filter(c=>c.name && c.name.replace(/^\//,'')!=='share').map(c=>({n:c.name.startsWith('/')?c.name:'/'+c.name,d:c.description||c.source||'',ok:true}));
+      mutate(x => { const s = x.sessions[sidx]; if (s) s.commands = commands; });
+    } catch { mutate(x => { const s = x.sessions[sidx]; if (s) s.commands = []; }); }
   };
   const refreshModels = async sidx => {
     try {
       const d = await sendRpc(sidx,{type:'get_available_models'});
-      setAvailableModels(Array.isArray(d) ? d : (d?.models || []));
+      const models = Array.isArray(d) ? d : (d?.models || []);
+      mutate(x => { const s = x.sessions[sidx]; if (s) s.models = models; });
     } catch(e) { toast('Model discovery failed: '+String(e.message||e)); }
+  };
+  const refreshThinkingLevels = async sidx => {
+    try {
+      const d = await sendRpc(sidx,{type:'get_available_thinking_levels'});
+      const levels = Array.isArray(d?.levels) ? d.levels : null;
+      if (levels) mutate(x => { const s = x.sessions[sidx]; if (s) s.thinkingLevels = levels; });
+    } catch { /* Older engines may not expose the catalog; the select keeps the active level only. */ }
+  };
+  /* Reattach dock tabs for PTYs that outlived a previous UI session; pty_open
+     against a live terminal replays its bounded scrollback into the tab. */
+  const restoreShells = async sidx => {
+    try {
+      const d = await listTerminals(sidx);
+      const terminals = Array.isArray(d?.terminals) ? d.terminals.filter(t => t && t.terminalId && t.alive) : [];
+      if (!terminals.length) return;
+      const project = dbRef.current.projects.find(p => p.id === dbRef.current.sessions[sidx]?.project);
+      for (const t of terminals) {
+        const s = dbRef.current.sessions[sidx]; if (!s) return;
+        if (s.shells.some(sh => sh.id === t.terminalId)) continue;
+        const name = 'Shell ' + (s.shells.length + 1);
+        mutate(x => { const sess = x.sessions[sidx]; if (!sess || sess.shells.some(sh => sh.id === t.terminalId)) return; sess.shells.push({ id: t.terminalId, name, cwd: project ? project.path : '', lines: [{ c: '', t: '' }], proc: 'native', exited: null, hist: [], trunc: 0 }); });
+        if (project) createTerminal(sidx, t.terminalId, project.path).catch(() => {});
+      }
+    } catch { /* pty_list unavailable on this build: dock restore skipped */ }
+  };
+  /* Post-handshake opt-ins, identical for every session: subagent frames and
+     OMP ask/confirm dialogs (the real approval path) must reach this UI. */
+  const bootSession = async sidx => {
+    await sendRpc(sidx,{type:'set_subagent_subscription',level:'events'}).catch(()=>{});
+    await sendRpc(sidx,{type:'set_ask_dialog',enabled:true}).catch(()=>{});
+    await refreshModels(sidx);
+    await refreshCommands(sidx);
+    await refreshThinkingLevels(sidx);
+    void refreshWorkers(sidx);
+    void restoreShells(sidx);
   };
   const refreshWorkerMessages = async (sidx, aid) => {
     try {
@@ -926,39 +981,82 @@ export default function CanoPi() {
     try { await sendRpc(sidx,{type:'steer_subagent',subagentId:aid,message:text}); pushMsg(sidx,aid,U(text)); }
     catch(e) { toast('Worker steering failed: '+String(e.message||e)); }
   };
-  const resolveApproval = () => unsupported('Tool approval');
-  const stopWorker = async aid => { try { await sendRpc(sid,{type:'cancel_subagent',subagentId:aid}); await refreshWorkers(sid); } catch(e) { toast(String(e.message||e)); } };
-  const restartWorker = () => unsupported('Worker restart');
+  const stopWorker = async aid => { try { await sendRpc(sid,{type:'cancel_subagent',subagentId:aid}); void queueWorkersSync(sid, 0); } catch(e) { toast(String(e.message||e)); } };
   const disconnect = () => { setConn('disconnected',sid); };
   const reconnect = async () => {
     if (!sid) { const info=await runtimeInfo(); setEngine(info); setConn(info.available?'idle':'disconnected',null); return; }
     const project=dbRef.current.projects.find(p=>p.id===dbRef.current.sessions[sid]?.project);
     if (!project) return;
-    try { const result=await startRuntime(sid,project.path); setConn('connected',sid); if(result.state) applyRuntimeState(sid,result.state); else await refreshState(sid); await refreshWorkers(sid); }
+    try { const result=await startRuntime(sid,project.path); setConn('connected',sid); if(result.state) applyRuntimeState(sid,result.state); else await refreshState(sid); await bootSession(sid); await refreshHistory(sid); }
     catch(e) { setConn('disconnected',sid); toast(String(e.message||e)); }
+  };
+  /* Session-scoped worker registry entry, created on the first frame that
+     mentions the id so early subagent events land in the right transcript. */
+  const ensureWorker = (sidx, aid, hint) => {
+    if (!aid || dbRef.current.sessions[sidx]?.agents[aid]) return;
+    mutate(d => {
+      const s = d.sessions[sidx]; if (!s || s.agents[aid]) return;
+      s.agents[aid] = mkAgent(aid, String(hint || aid), 'running', String(hint || 'Working'));
+      s.threads[aid] = []; s.traces[aid] = []; s.order.push(aid);
+    });
+  };
+  /* One-way extension events carry no registered reply id in the Rust bridge,
+     so they are applied locally; only response-bearing methods open a dialog. */
+  const applyOneWayExtension = (sidx, frame) => {
+    switch (frame.method) {
+      case 'notify': toast(String(frame.message || 'OMP notification')); return true;
+      case 'setTitle': document.title = String(frame.title || 'canoPi'); return true;
+      case 'set_editor_text': setDraft(sidx + ':main', String(frame.text || '')); return true;
+      case 'setStatus': mutate(d => { const s = d.sessions[sidx]; if (!s) return; const st = { ...(s.extStatus || {}) }; if (frame.statusText) st[String(frame.statusKey)] = String(frame.statusText); else delete st[String(frame.statusKey)]; s.extStatus = st; }); return true;
+      case 'setWidget': mutate(d => { const s = d.sessions[sidx]; if (!s) return; const w = { ...(s.extWidgets || {}) }; if (Array.isArray(frame.widgetLines)) w[String(frame.widgetKey)] = { lines: frame.widgetLines.map(String), placement: frame.widgetPlacement || 'belowEditor' }; else delete w[String(frame.widgetKey)]; s.extWidgets = w; }); return true;
+      case 'open_url': {
+        const url = String(frame.launchUrl || frame.url || '');
+        if (url && navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(() => toast('Sign-in link copied. Finish sign-in in your browser.')).catch(() => toast('Sign-in link: ' + url));
+        } else toast('Sign-in link: ' + url);
+        return true;
+      }
+      default: return false;
+    }
   };
   logic.current.onFrame = ({sessionKey,frame}) => {
     const sidx=sessionKey, ss=dbRef.current.sessions[sidx]; if(!ss || !frame) return;
     const ty=frame.type;
     if (ty==='available_commands_update') {
-      setRuntimeCommands((frame.commands||[]).filter(c=>c.name && c.name!=='share' && c.name!=='/share').map(c=>({n:c.name.startsWith('/')?c.name:'/'+c.name,d:c.description||c.source||'',ok:true}))); return;
+      const commands=(frame.commands||[]).filter(c=>c.name && c.name!=='share' && c.name!=='/share').map(c=>({n:c.name.startsWith('/')?c.name:'/'+c.name,d:c.description||c.source||'',ok:true}));
+      mutate(d => { const s=d.sessions[sidx]; if (s) s.commands = commands; }); return;
     }
     if (ty==='prompt_result' && frame.status==='error') {
       pushMsg(sidx,'main',N('OMP turn failed: '+String(frame.error?.message||'Provider error')));
     }
-    if (ty==='runtime_exit' || ty==='transport_error') { setConn('disconnected',sidx); setAgent(sidx,'main',{state:'disconnected',activity:ty==='transport_error'?'RPC transport failed':'Engine exited'}); return; }
+    if (ty==='runtime_exit' || ty==='transport_error') {
+      const detail=(ty==='transport_error'?'RPC transport failed':'Engine exited')+(Number.isInteger(frame.code)?' (exit code '+frame.code+')':'');
+      setConn('disconnected',sidx); setAgent(sidx,'main',{state:'disconnected',activity:detail});
+      if (ty==='runtime_exit' && frame.unexpected) pushMsg(sidx,'main',N('The engine stopped unexpectedly'+(Number.isInteger(frame.code)?' with exit code '+frame.code:'')+'. Reconnect to restart this session.'));
+      return;
+    }
+    if (ty==='rpc_late_response') {
+      /* The Rust wait already timed out locally; this admission arrived late.
+         Reconcile instead of resending, so the prompt is never admitted twice. */
+      const resp=frame.response||{};
+      if (resp.success) { setAgent(sidx,'main',{state:'running',activity:'Working'}); pushMsg(sidx,'main',N('OMP admitted the request after a slow start; canoPi did not resend it.')); queueStateSync(sidx); }
+      else queueStateSync(sidx);
+      return;
+    }
+    if (ty==='stderr_redacted') {
+      if (frame.panicked) { pushMsg(sidx,'main',N('The cnp engine reported a panic ('+String(frame.byteCount||0)+' stderr bytes redacted).')); setAgent(sidx,'main',{state:'failed',activity:'Engine panic'}); }
+      return;
+    }
     if (ty==='extension_ui_request') {
       if (frame.method==='cancel') { setRuntimeDialog(x=>x?.frame?.id===frame.targetId?null:x); return; }
-      if (['notify','setStatus','setWidget','setTitle','set_editor_text'].includes(frame.method)) {
-        if(frame.method==='notify') toast(String(frame.message||frame.text||'OMP notification')); return;
-      }
+      if (applyOneWayExtension(sidx, frame)) return;
       setRuntimeDialog({sessionKey:sidx,frame}); return;
     }
     if (ty==='agent_start') setAgent(sidx,'main',{state:'running',activity:'Working'});
-    if (ty==='agent_end' || ty==='session_settled') { setAgent(sidx,'main',{state:'idle',activity:'Ready'}); queueStateSync(sidx); void refreshWorkers(sidx); }
+    if (ty==='agent_end' || ty==='session_settled') { setAgent(sidx,'main',{state:'idle',activity:'Ready'}); queueStateSync(sidx); queueWorkersSync(sidx); }
     if (ty==='model_changed' || ty==='thinking_level_changed') queueStateSync(sidx);
     if (ty==='tool_execution_start') {
-      const id='tool-'+String(frame.toolCallId||frame.id||mid());
+      const id='tool-'+(toolCallIdOf(frame)||String(mid()));
       const tool=String(frame.toolName||frame.name||'tool');
       const arg=typeof frame.args==='string'?frame.args:JSON.stringify(frame.args||{});
       if(!ss.threads.main.some(m=>m.id===id)) pushMsg(sidx,'main',{id,role:'tool',tool,arg,status:'running'});
@@ -966,29 +1064,50 @@ export default function CanoPi() {
       if(tool==='todo'||tool==='task') queueStateSync(sidx);
     }
     if (ty==='tool_execution_end') {
-      const id='tool-'+String(frame.toolCallId||frame.id||'');
+      const id='tool-'+toolCallIdOf(frame);
       patchMsg(sidx,'main',id,{status:frame.isError?'error':'ok',meta:frame.isError?'Failed':'Done'});
-      queueStateSync(sidx); void refreshWorkers(sidx);
+      queueStateSync(sidx); queueWorkersSync(sidx);
     }
     if (ty==='message_start' || ty==='message_update' || ty==='message_end') {
-      mutate(d=>{
-        const session=d.sessions[sidx]; if(!session) return;
-        session.threads.main=projectAssistantFrame(session.threads.main,frame);
+      updateSessionLight(sidx, session => {
+        const list = projectAssistantFrame(session.threads.main, frame);
+        if (list === session.threads.main) return session;
+        return { ...session, threads: { ...session.threads, main: list } };
       });
     }
-    if (ty==='subagent_event' || ty==='subagent_lifecycle' || ty==='subagent_progress') {
-      void refreshWorkers(sidx);
-      const aid=String(frame.subagentId||frame.id||'');
-      const ev=frame.event||frame.payload;
-      if(aid && ev?.type==='message_end' && ev.message?.role==='assistant') {
+    if (ty==='subagent_lifecycle') {
+      const p=frame.payload||{}; const aid=subagentFrameId(frame); if(!aid) return;
+      ensureWorker(sidx,aid,p.description||p.agent);
+      const st=workerStateFromStatus(p.status)||'running';
+      setAgent(sidx,aid,{state:st,activity:String(p.description||p.agent||'Worker')});
+      queueWorkersSync(sidx); return;
+    }
+    if (ty==='subagent_progress') {
+      const p=frame.payload||{}; const aid=subagentFrameId(frame); if(!aid) return;
+      ensureWorker(sidx,aid,p.task||p.description||p.agent);
+      const st=workerStateFromStatus(p.progress?.status);
+      if (st) setAgent(sidx,aid,{state:st,activity:String(p.progress?.currentTool?`Running ${p.progress.currentTool}`:p.task||'Working')});
+      queueWorkersSync(sidx); return;
+    }
+    if (ty==='subagent_event') {
+      const aid=subagentFrameId(frame); const ev=subagentFrameEvent(frame);
+      if(!aid || !ev) return;
+      ensureWorker(sidx,aid);
+      if (ev.type==='message_end' && ev.message?.role==='assistant') {
         const body=textFromMessage(ev.message);
-        if(body && dbRef.current.sessions[sidx]?.threads[aid]) pushMsg(sidx,aid,{role:'asst',text:body});
+        if (body) pushMsg(sidx,aid,{role:'asst',text:body});
       }
+      if (ev.type==='tool_execution_start') {
+        const tool=String(ev.toolName||ev.name||'tool');
+        const arg=typeof ev.args==='string'?ev.args:JSON.stringify(ev.args||{});
+        addTrace(sidx,aid,tr(tool,arg,'running',''));
+      }
+      if (ev.type==='tool_execution_end' || ev.type==='agent_end') queueWorkersSync(sidx);
     }
   };
   useEffect(() => {
     let dispose=()=>{}; let alive=true;
-    watchFrames(frame => logic.current.onFrame?.(frame)).then(fn=>{ if(alive) dispose=fn; else fn(); });
+    watchFrames(frame => logic.current.onFrame?.(frame), () => setStale(n => n + 1)).then(fn=>{ if(alive) dispose=fn; else fn(); });
     return ()=>{alive=false;dispose();};
   },[]);
   useEffect(() => {
@@ -1002,6 +1121,11 @@ export default function CanoPi() {
     if(!model) return;
     try { await sendRpc(sid,{type:'set_model',provider:model.provider,modelId:model.id||model.modelId}); await refreshState(sid); }
     catch(e) { toast('Model change failed: '+String(e.message||e)); }
+  };
+  const setThinking = async value => {
+    if (!sid) { toast('Open a session to change the thinking level.'); return; }
+    try { await sendRpc(sid,{type:'set_thinking_level',level:value}); await refreshState(sid); }
+    catch(e) { toast('Thinking level change failed: '+String(e.message||e)); }
   };
   const answerDialog = async response => {
     if(!runtimeDialog) return;
@@ -1024,18 +1148,17 @@ export default function CanoPi() {
   }, []); // eslint-disable-line
 
   const A = {
-    gsap, db, sid, ss, view, insp, inspTab, conn, engine, availableModels, runtimeCommands, liveModel, runtimeDialog, changeModel, answerDialog, importProviderDefinitions, dock, dragging, mode, shellId: curShellId, phase, group, selTask, colTab, drafts, settings, theme, railOpen, collapsed, homeProject, stale,
-    drawer, palette, confirmS, pv, dockTabs, dockHeight, dockMax, workRef, scrollRef, eff,
-    setDraft, setSet, setSettings, setPhase, setGroup, setSelTask, setColTab, setMode, setShellId, setDock, setDragging, setRailOpen, setCollapsed, setHomeProject, setDrawer, setPalette, setConn, setConfirmS,
-    toast, confirm, mutate, pushMsg, patchMsg, addTrace, setAgent, stream, gate, setTodos, goHome, openSession, setView, openInspector, closeInspector, focusTrace, toggleTheme, newSession: goHome, openFolder, startSession,
-    surfaceNav, surfaceOpen, signIn, replayRun, withSurf, shellExec, shellInterrupt, newShell, closeShell, mainReply, stopMain, steer, resolveApproval, stopWorker, restartWorker, disconnect, reconnect, setStale, AUD
+    gsap, db, sid, ss, view, insp, inspTab, conn, engine, availableModels, runtimeCommands, liveModel, thinkingLevels, thinkingLevel, runtimeDialog, changeModel, setThinking, answerDialog, importProviderDefinitions, dock, dragging, mode, shellId: curShellId, phase, group, selTask, colTab, drafts, theme, railOpen, collapsed, homeProject, stale,
+    drawer, palette, confirmS, dockTabs, dockHeight, dockMax, workRef, scrollRef, eff,
+    setDraft, setPhase, setGroup, setSelTask, setColTab, setMode, setShellId, setDock, setDragging, setRailOpen, setCollapsed, setHomeProject, setDrawer, setPalette, setConn, setConfirmS,
+    toast, confirm, mutate, updateSessionLight, pushMsg, patchMsg, addTrace, setAgent, setTodos, goHome, openSession, setView, openInspector, closeInspector, focusTrace, toggleTheme, newSession: goHome, openFolder, startSession,
+    shellExec, shellInterrupt, newShell, closeShell, mainReply, stopMain, steer, stopWorker, disconnect, reconnect, setStale
   };
 
   return (
     <Ctx.Provider value={A}>
       <div className="cp" data-theme={theme}>
         <style>{CSS}</style>
-        <input ref={fileRef} type="file" webkitdirectory="" multiple hidden onChange={onFolderPicked} aria-hidden="true" tabIndex={-1} />
         <div className="app" ref={appRef}>
           <Topbar />
           {conn === 'disconnected' && <div className="banner" role="status"><Unplug size={16} /><span><b>canoPi engine unavailable.</b> {engine.error || "The engine is disconnected."}</span><span className="grow" /><button className="btn sm primary" onClick={reconnect}>Reconnect</button></div>}
@@ -1190,6 +1313,14 @@ function Home() {
           </div>
         </form>
         <div className="starters">{STARTERS.map(s => <button key={s} onClick={() => { A.setDraft('home', s); if (ta.current) ta.current.focus(); }}>{s}</button>)}</div>
+        {!A.db.projects.length && (
+          <div className="offline" role="status"><b>No project open yet.</b> Open a project folder to create a canoPi session inside it. The folder stays on this PC; canoPi only stores its name and path as UI metadata.
+            <div className="btns" style={{ marginTop: 8 }}><button type="button" className="btn primary" onClick={A.openFolder}>Open project folder</button></div>
+          </div>
+        )}
+        {A.db.projects.length > 0 && !A.engine.available && (
+          <div className="offline" role="status"><b>Bundled cnp engine unavailable.</b> {A.engine.error || 'The bundled engine was not found.'} New sessions cannot start until the engine ships with canoPi.</div>
+        )}
       </div>
     </section>
   );
@@ -1203,9 +1334,12 @@ function Conversation() {
   return (
     <section className="conv" aria-label="Main conversation" ref={ref}>
       <header className="sess-head">
-        <div><h1>{ss.name}</h1><p><span>Main agent</span><StateTag s={A.eff(m)} /><span>{m.activity}</span></p></div>
+        <div><h1>{ss.name}</h1><p><span>Main agent</span><StateTag s={A.eff(m)} /><span>{m.activity}</span>{ss.extStatus && Object.values(ss.extStatus).length ? <span>{Object.values(ss.extStatus).join(' · ')}</span> : null}</p></div>
         <span className="grow" />{running && <button className="btn sm" onClick={A.stopMain}>Stop turn</button>}
       </header>
+      {ss.extWidgets && Object.entries(ss.extWidgets).map(([k, w]) => (
+        <details key={k} className="bsec" style={{ margin: '8px 22px 0' }} open><summary>{k}</summary><div className="in">{w.lines.map((l, i) => <div key={i}>{l}</div>)}</div></details>
+      ))}
       <Transcript tkey={ss.id + ':main'} msgs={ss.threads.main} ctx="main" label="Main agent transcript" id="transcript" />
     </section>
   );
@@ -1227,7 +1361,6 @@ function Msg({ m, ctx }) {
     case 'notice': return <div className="msg notice">{m.text}</div>;
     case 'tool': return <ToolRow m={m} ctx={ctx} />;
     case 'worker': return <WorkerCard aid={m.aid} />;
-    case 'approval': return <ApprovalCard m={m} />;
     default: return null;
   }
 }
@@ -1249,17 +1382,6 @@ function WorkerCard({ aid }) {
       <div className="row"><h4>{a.name}</h4><StateTag s={A.eff(a)} /></div>
       <p>{a.activity || 'No activity reported'}</p>
       <div className="row"><button className="btn sm" onClick={() => A.openInspector(aid, 'transcript')}>Open</button><button className="btn sm ghost" onClick={() => A.focusTrace(aid)}>Activity</button>{surf && <button className="btn sm ghost" onClick={() => A.openInspector(aid, 'browser')}>Browser</button>}</div>
-    </div>
-  );
-}
-function ApprovalCard({ m }) {
-  const A = useApp(); const s = m.status;
-  return (
-    <div className={'card' + (s === 'pending' ? ' pending' : '')}>
-      <div className="row"><h4>Main agent wants to delete files</h4><span className={'st ' + (s === 'pending' ? 'st-waiting' : s === 'approved' ? 'st-completed' : 'st-failed')}>{s === 'pending' ? 'Needs your OK' : s === 'approved' ? 'Allowed' : 'Denied'}</span></div>
-      <code>{m.arg}</code>
-      <p>{s === 'pending' ? 'It waits until you decide.' : s === 'approved' ? 'You allowed it and it ran.' : 'You denied it. It did not run.'}</p>
-      {s === 'pending' && <div className="row"><button className="btn sm primary" onClick={() => A.resolveApproval(m.id, 'approved')}>Allow once</button><button className="btn sm danger" onClick={() => A.resolveApproval(m.id, 'denied')}>Deny</button></div>}
     </div>
   );
 }
@@ -1306,7 +1428,7 @@ function Composer() {
           <button type="button" role="radio" aria-checked={shell} disabled={!ss.shells.length} title={ss.shells.length ? '' : 'Open a shell first'} onClick={() => { A.setMode('shell'); setTimeout(() => ta.current && ta.current.focus(), 0); }}>Shell</button>
         </div>
         {shell && <select aria-label="Shell to send to" value={A.shellId || ''} onChange={e => A.setShellId(e.target.value)}>{ss.shells.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>}
-        <span className="route">{shell ? (sh ? <>To <b>{sh.name}</b>. ConPTY unavailable in this build.</> : 'No shell open') : <>To <b>Main agent</b> only</>}</span>
+        <span className="route">{shell ? (sh ? <>To <b>{sh.name}</b>. Native ConPTY shell.</> : 'No shell open') : <>To <b>Main agent</b> only</>}</span>
       </div>
       <div className="c-box">
         <textarea ref={ta} rows={1} className={shell ? 'mono' : ''} value={value} onChange={onChange} onKeyDown={onKey} disabled={!shell && off}
@@ -1316,8 +1438,10 @@ function Composer() {
       </div>
       <div className="c-meta">
         <button type="button" className="chip" onClick={() => A.setDrawer('models')}>{A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : 'Model from OMP'}</button>
-        <label>Thinking <select aria-label="Thinking level" value={A.settings.think} onChange={e => A.setSet({ think: e.target.value })}>{THINK.map(o => <option key={o}>{o}</option>)}</select></label>
-        <span className="meter" title="Context usage is not reported by this UI yet">Context —</span>
+        <label>Thinking <select aria-label="Thinking level" disabled={!(A.thinkingLevels && A.thinkingLevels.length)} value={A.thinkingLevel ?? ''} onChange={e => A.setThinking(e.target.value)}>
+          {(A.thinkingLevels && A.thinkingLevels.length ? A.thinkingLevels : [A.thinkingLevel]).filter(Boolean).map(o => <option key={o} value={o}>{String(o).charAt(0).toUpperCase()+String(o).slice(1)}</option>)}
+        </select></label>
+        <span className="meter" title={ss.context && ss.context.tokens != null ? `${ss.context.tokens} of ${ss.context.contextWindow} context tokens` : 'Context usage is not reported by this runtime yet'}>Context {ss.context && ss.context.tokens != null ? `${ss.context.tokens}${ss.context.contextWindow ? '/' + ss.context.contextWindow : ''}` : '—'}</span>
       </div>
       {slash.list.length > 0 && (
         <div className="slash" role="listbox" aria-label="Commands">
@@ -1335,7 +1459,7 @@ function Inspector() {
   useLayoutEffect(() => { if (A.gsap && !RM) A.gsap.from(ref.current, { x: 36, opacity: 0, duration: .26, ease: 'power2.out', clearProps: 'all' }); }, []); // eslint-disable-line
   const off = A.conn === 'disconnected'; const st = A.eff(a);
   const link = Object.entries(ss.links).filter(([, v]) => v === aid).map(([k]) => k);
-  const canStop = !off && ['running', 'waiting', 'reviewing'].includes(a.state), canRestart = false; // OMP cancel is terminal; no fake restart
+  const canStop = !off && ['running', 'waiting', 'reviewing'].includes(a.state); // OMP cancel is terminal; there is no restart RPC
   const tab = isMain ? 'browser' : A.inspTab;
   return (
     <aside className="insp glass" aria-label="Worker inspector" ref={ref}>
@@ -1348,7 +1472,6 @@ function Inspector() {
         <div className="insp-acts">
           <button className="btn sm" onClick={() => A.focusTrace(aid)}><Terminal size={13} />Activity</button>
           {canStop && <button className="btn sm danger" onClick={() => A.stopWorker(aid)}>Stop worker</button>}
-          {canRestart && <button className="btn sm" onClick={() => A.restartWorker(aid)}>Restart worker</button>}
         </div>
       )}
       {!isMain && <div className="tabs" role="tablist" aria-label="Inspector views">
@@ -1379,21 +1502,35 @@ function InspChat({ aid }) {
 
 /* ---------------- browser ---------------- */
 function BrowserPanel({aid}) {
-  const A=useApp();const a=A.ss.agents[aid];
-  const [url,setUrl]=useState('https://example.com');
-  const [opened,setOpened]=useState(false);
+  const A=useApp();const a=A.ss.agents[aid];const surf=A.ss.browsers[aid];
+  const [url,setUrl]=useState(surf?.url || 'https://example.com');
+  const [shot,setShot]=useState(null);
+  const record=u=>A.mutate(d=>{const s=d.sessions[A.ss.id];if(!s)return;s.browsers={...s.browsers,[aid]:{owner:A.ss.id+'/'+aid,state:'open',url:u,lastUsed:Date.now()}};});
+  const refreshState=async()=>{try{const st=await agentBrowserState(A.ss.id,aid);if(st&&st.url)record(st.url);}catch{/* surface state is cosmetic */}};
   const open=async()=>{
-    try {await openAgentBrowser(A.ss.id,aid,url);setOpened(true);}
+    try { if(!surf) await openAgentBrowser(A.ss.id,aid,url); else await navigateAgentBrowser(A.ss.id,aid,url);
+      record(url); A.toast(surf?'Native browser navigated':'Native browser opened for '+a.name); void refreshState();}
     catch(e){A.toast('Native browser: '+String(e));}
   };
-  const close=async()=>{try{await closeAgentBrowser(A.ss.id,aid);setOpened(false);}catch(e){A.toast(String(e));}};
+  const reload=async()=>{try{await reloadAgentBrowser(A.ss.id,aid);void refreshState();}catch(e){A.toast(String(e));}};
+  const capture=async()=>{try{const s=await screenshotAgentBrowser(A.ss.id,aid);if(s&&s.dataBase64)setShot('data:image/png;base64,'+s.dataBase64);}catch(e){A.toast('Screenshot: '+String(e));}};
+  const close=async()=>{try{await closeAgentBrowser(A.ss.id,aid);setShot(null);
+    A.mutate(d=>{const s=d.sessions[A.ss.id];if(!s)return;const b={...s.browsers};delete b[aid];s.browsers=b;});}
+    catch(e){A.toast(String(e));}};
   return <div className="bpanel">
     <div className="btool"><Globe size={15}/><input aria-label="Browser address" value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')void open();}} /></div>
     <div className="vp" style={{marginTop:14}}><div className="empty"><Globe size={24}/><b>{a.name} · private browser</b>
       <p>Opens a real native browser window with an isolated profile for this agent on Windows. This is not simulated page content.</p>
-      <div className="btns"><button className="btn primary" onClick={open}>{opened?'Navigate / focus':'Open native browser'}</button>{opened&&<button className="btn" onClick={close}>Close window</button>}</div>
+      <div className="btns">
+        <button className="btn primary" onClick={open}>{surf?'Navigate':'Open native browser'}</button>
+        {surf&&<button className="btn" onClick={reload}>Reload</button>}
+        {surf&&<button className="btn" onClick={capture}>Screenshot</button>}
+        {surf&&<button className="btn" onClick={close}>Close window</button>}
+      </div>
+      {surf && <p>Window open at {surf.url}</p>}
     </div></div>
-    <p className="bmeta">Agent-driven page interaction and screenshots still require a separate browser tool adapter.</p>
+    {shot && <img src={shot} alt="Screenshot captured from the native browser window" style={{margin:'4px 16px',width:'calc(100% - 32px)',border:'1px solid var(--glass-line)',borderRadius:12}} />}
+    <p className="bmeta">Address bar, reload and screenshots are host controls. Agent-driven page interaction and page reads still require OMP's browser tool adapter.</p>
   </div>;
 }
 
@@ -1531,7 +1668,7 @@ function ShellPane({ sh, picker, sid }) {
   const A = useApp(); const out = useRef(null); const [size, setSize] = useState(''); useStick(out, sh.lines);
   useEffect(() => { const el = out.current; if (!el || typeof ResizeObserver === 'undefined') return undefined; const upd = () => {const cols=Math.max(20,Math.floor(el.clientWidth/7.8)),rows=Math.max(2,Math.floor(el.clientHeight/19));setSize(`${cols}x${rows}`);void resizeTerminal(sid,sh.id,rows,cols).catch(()=>{});}; upd(); const ro = new ResizeObserver(upd); ro.observe(el); return () => ro.disconnect(); }, []);
   const key = 'shell-in:' + sid + ':' + sh.id; const value = A.drafts[key] || ''; const hi = useRef(null);
-  const info = sh.exited != null ? `Exited with code ${sh.exited}` : sh.proc ? `Running ${sh.proc}. Ctrl+C stops it` : 'Ready';
+  const info = sh.exited != null ? (Number.isInteger(sh.exited) ? `Exited with code ${sh.exited}` : 'PTY session ended. The engine did not report an exit code.') : sh.proc ? `Running ${sh.proc}. Ctrl+C stops it` : 'Ready';
   return (
     <div className="tpane">
       <div className="tp-h">{picker}<span>{sh.name} (native PTY)</span><span style={{ marginLeft: 'auto' }}>{info}</span><span>{size}</span>{sh.exited != null && <button className="btn sm" onClick={A.newShell}>New shell</button>}</div>
@@ -1624,10 +1761,9 @@ function ConnGraph() {
 }
 
 function Row2({ children, sub, right }) { return <div className="row2"><div>{children}{sub && <small>{sub}</small>}</div>{right}</div>; }
-function PvSel({ label, v, set, opts }) { return <label>{label}<select value={v} onChange={e => set(e.target.value)}>{opts.map(([val, l]) => <option key={val} value={val}>{l}</option>)}</select></label>; }
 function Need() { return <p className="lede">Open a session first. This section is about what the agents in a session are doing.</p>; }
 function DrawerBody({ sec }) {
-  const A = useApp(); const S = A.settings; const ss = A.ss;
+  const A = useApp(); const ss = A.ss;
   const close = () => A.setDrawer(null);
   const insert = text => { close(); setTimeout(() => { if (ss) { A.setMode('agent'); A.setView('conv'); A.setDraft(ss.id + ':main', text); } else A.setDraft('home', text); }, 0); };
   const sel = (val, opts, on, label) => <select aria-label={label} value={val} onChange={e => on(e.target.value)}>{opts.map(o => <option key={o}>{o}</option>)}</select>;
@@ -1637,10 +1773,10 @@ function DrawerBody({ sec }) {
     case 'connections': return !ss ? <Need /> : (<><h3>Connections</h3><p className="lede">Only links canoPi really knows about: the main agent, its workers, and the activity log and browser each one owns.</p><ConnGraph /><p className="lede" style={{ marginTop: 8 }}>Your own shells belong to no agent. An activity log is not a terminal.</p></>);
     case 'models': return (<><h3>Models and roles</h3><p className="lede">Models reported by the current OMP process. Credentials stay inside OMP.</p>
       <h4>Active model</h4><Row2 sub={ss ? 'Changes apply to this session only' : 'Open a session first'} right={<select aria-label="OMP model" disabled={!ss || !A.availableModels.length} value={A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : ''} onChange={e=>A.changeModel(e.target.value)}>
-        <option value="">{A.availableModels.length ? 'Choose model' : 'No models reported'}</option>
+        <option value="">{A.availableModels.length ? 'Choose model' : (ss ? 'No models reported by this session' : 'Open a session to load models')}</option>
         {A.availableModels.map((m,i)=><option key={i} value={m.provider+'/'+(m.id||m.modelId)}>{m.provider}/{m.id||m.modelId}</option>)}
       </select>}>Model</Row2>
-      <h4>Thinking</h4><Row2 sub="Read from OMP get_state" right={<b>{S.think}</b>}>Active level</Row2>
+      <h4>Thinking</h4><Row2 sub="Reported by OMP get_state; change it from the composer" right={<b>{ss?.thinkingLevel ?? '—'}</b>}>Active level</Row2>
       <h4>Provider setup</h4><Row2 sub="Optional, models.yml only; copies provider definitions without changing OMP. Existing canoPi config is never overwritten." right={<button className="btn sm" disabled={!!ss} onClick={A.importProviderDefinitions}>Import OMP models</button>}>Import provider definitions</Row2>
       <Row2 sub="Provider login and account credentials still require OMP authentication; stored auth databases are not copied." right={<span className="na">Not migrated</span>}>Credentials</Row2>
     </>);
@@ -1655,11 +1791,11 @@ function DrawerBody({ sec }) {
     case 'rules': return (<><h3>Rules, skills and memory</h3><p className="lede">Owned by the bundled OMP profile. Editing is not exposed in this build.</p></>);
 
 
-    case 'context': { if (!ss) return <Need />; const pend = ss.threads.main.filter(m => m.role === 'approval' && m.status === 'pending');
+    case 'context': { if (!ss) return <Need />; const ctx = ss.context;
       return (<><h3>Context and approvals</h3><p className="lede">Numbers appear only when the runtime reports them.</p>
-        <Row2 sub="Not yet projected from OMP" right={<span className="na">Unavailable</span>}>Context used</Row2><Row2 sub="Hidden. This runtime does not report them." right={<span className="na">Unavailable</span>}>Tokens and cost</Row2>
-        <h4>Approvals</h4><Row2 right={sel(S.approval, ['Ask for destructive tools', 'Ask for every tool', 'Allow reads automatically'], v => A.setSet({ approval: v }), 'Approval policy')}>Policy</Row2>
-        <h4>Waiting for you</h4>{pend.length ? pend.map(m => <Row2 key={m.id} right={<button className="btn sm" onClick={() => { close(); setTimeout(() => { A.setView('conv'); const n = document.querySelector('.card.pending'); if (n && n.scrollIntoView) n.scrollIntoView({ block: 'center' }); }, 0); }}>Review</button>}><code>{m.tool}</code> {m.arg}</Row2>) : <p className="lede">Nothing is waiting.</p>}</>); }
+        <Row2 sub={ctx && ctx.tokens != null ? `${ctx.tokens} tokens of the ${ctx.contextWindow} context window` : 'This runtime has not reported context usage'} right={ctx && ctx.tokens != null ? <b>{ctx.tokens}{ctx.contextWindow ? ' / ' + ctx.contextWindow : ''}</b> : <span className="na">Unavailable</span>}>Context used</Row2><Row2 sub="Hidden. This runtime does not report them." right={<span className="na">Unavailable</span>}>Tokens and cost</Row2>
+        <h4>Approvals</h4><Row2 sub="OMP asks through its own dialogs; a pending request opens the native dialog and blocks the engine until you answer." right={<b>{A.runtimeDialog ? 'Waiting for you' : 'Nothing waiting'}</b>}>Approval requests</Row2>
+        <Row2 sub="Approvals are owned by OMP policy; canoPi forwards your decisions verbatim." right={<span className="na">Engine-owned</span>}>Policy</Row2></>); }
     case 'runtime': return (<><h3>Runtime and profile</h3><p className="lede">canoPi never changes your OMP install, credentials or 9Router settings on its own.</p>
       <Row2 sub="Bundled with canoPi, not a global installation" right={<span className="na">{A.engine.available ? "Available" : "Missing"}</span>}>Bundled cnp engine</Row2>
       <Row2 sub="An isolated canoPi profile is used for the first test." right={<b>Isolated</b>}>Profile in use</Row2>

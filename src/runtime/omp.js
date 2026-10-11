@@ -29,12 +29,12 @@ export async function sendRpc(sessionKey, command) {
 export async function answerUi(sessionKey, response) {
   return invoke('rpc_ui_reply', { sessionKey, response, expectedGeneration: generations.get(sessionKey) ?? null });
 }
-export async function watchFrames(onFrame) {
+export async function watchFrames(onFrame, onStale) {
   if (!inDesktop()) return () => {};
   return listen('cnp-frame', e => {
     const packet = e.payload;
     const current = generations.get(packet?.sessionKey);
-    if (current == null || packet?.generation !== current) return;
+    if (current == null || packet?.generation !== current) { if (onStale) onStale(packet); return; }
     onFrame(packet);
   });
 }

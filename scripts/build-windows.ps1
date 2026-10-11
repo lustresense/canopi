@@ -264,8 +264,8 @@ try {
 
     # ---------------- publish release artifacts (success only) --------------
     $ver = $script:Version
-    $setupName = "canopi-windows-x64-setup-$ver.exe"
-    $sourceZipName = "canopi-source-$ver.zip"
+    $setupName = "canoPi-Setup-$ver-win-x64.exe"
+    $sourceZipName = "canoPi-source-$ver.zip"
     $published = $true
     Must 'Publish installer and provenance to release/' {
         Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $releaseDir $setupName) -Force
@@ -369,11 +369,20 @@ try {
         ConvertTo-Json -InputObject $manifest -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseDir 'BUILD-MANIFEST.json') -Encoding UTF8
     }
     Must 'Create installer ZIP' {
-        Compress-Archive -Path `
-            (Join-Path $releaseDir $setupName), `
-            (Join-Path $releaseDir 'ENGINE-PROVENANCE.json'), `
-            (Join-Path $releaseDir 'BUILD-MANIFEST.json') `
-            -DestinationPath (Join-Path $releaseDir 'canoPi-windows-installer.zip') -Force
+        $zipStage = Join-Path $env:TEMP ('canopi-zip-' + [guid]::NewGuid().ToString('N'))
+        try {
+            New-Item -ItemType Directory -Path $zipStage | Out-Null
+            Copy-Item -LiteralPath (Join-Path $releaseDir $setupName) -Destination (Join-Path $zipStage $setupName) -Force
+            Copy-Item -LiteralPath (Join-Path $releaseDir 'ENGINE-PROVENANCE.json') -Destination (Join-Path $zipStage 'ENGINE-PROVENANCE.json') -Force
+            Copy-Item -LiteralPath (Join-Path $releaseDir 'BUILD-MANIFEST.json') -Destination (Join-Path $zipStage 'BUILD-MANIFEST.json') -Force
+            $zipSums = foreach ($f in @($setupName, 'ENGINE-PROVENANCE.json', 'BUILD-MANIFEST.json')) {
+                '{0}  {1}' -f (Get-FileHash -LiteralPath (Join-Path $zipStage $f) -Algorithm SHA256).Hash, $f
+            }
+            Set-Content -LiteralPath (Join-Path $zipStage 'SHA256SUMS.txt') -Value ($zipSums -join "`r`n") -Encoding UTF8
+            Compress-Archive -Path (Join-Path $zipStage '*') -DestinationPath (Join-Path $releaseDir 'canoPi-windows-installer.zip') -Force
+        } finally {
+            if (Test-Path -LiteralPath $zipStage) { Remove-Item -LiteralPath $zipStage -Recurse -Force -ErrorAction SilentlyContinue }
+        }
     }
     Must 'Create SHA256SUMS.txt covering release artifacts' {
         $names = @($setupName, $sourceZipName, 'ENGINE-PROVENANCE.json', 'BUILD-MANIFEST.json', 'canoPi-windows-installer.zip')

@@ -164,8 +164,8 @@ $lines += ''
 $artifactNames = @()
 if ($null -ne $manifest) {
     $artifactNames = @(
-        "canopi-windows-x64-setup-$($manifest.version).exe",
-        "canopi-source-$($manifest.version).zip",
+        "canoPi-Setup-$($manifest.version)-win-x64.exe",
+        "canoPi-source-$($manifest.version).zip",
         'ENGINE-PROVENANCE.json', 'BUILD-MANIFEST.json',
         'SHA256SUMS.txt', 'canoPi-windows-installer.zip'
     )

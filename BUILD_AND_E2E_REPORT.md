@@ -2,7 +2,7 @@
 
 Date: 2026-10-11 (UTC)  
 Host: Windows 10 Pro build 26200.9457 x64  
-Repo commit: `5fd823bc0aeead8899293d7ef50965460f921cd6`  
+Repo commit: `770df36b394d40649224ef7b4a03de1735661e6e`  
 Pinned upstream OMP: `2a2c6dcbbb558c0f8145f67f28b3370984f2bf60` (v18.6.1)  
 Product identity: `canoPi` 1.0.0, identifier `app.canopi.desktop`, publisher `canoPi Project`  
 Build result: **SUCCESS** (all 27 pipeline steps completed)
@@ -30,10 +30,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -E
 11. Live engine RPC v2 handshake smoke (no provider secrets needed) — PASSED (0)
 12. Place engine at bundled resource path (`src-tauri/resources/engine/cnp-engine.exe`) — PASSED (0)
 13. Install desktop dependencies from lockfile (`npm ci`) — PASSED (0)
-14. Node runtime and source tests (53/53 passed) — PASSED (0)
+14. Node runtime and source tests (58/58 passed) — PASSED (0)
 15. React frontend production build (`vite build`) — PASSED (0)
 16. Cargo lockfile in sync (`cargo fetch --locked`) — PASSED (0)
-17. Compile and test Rust (`cargo test`, 27/27 passed) — PASSED (0)
+17. Compile and test Rust (`cargo test`, 32/32 passed) — PASSED (0)
 18. Package NSIS Windows installer (Tauri `tauri build --bundles nsis`) — PASSED (0)
 19. Installer is a real Windows PE of plausible size — PASSED (0)
 20. Uninstall data cleanup tests on disposable profiles (`test-uninstall-data.ps1`) — PASSED (0)
@@ -78,22 +78,21 @@ All release artifacts reside in `release/`:
 
 | Artifact | File Size (bytes) | SHA256 Hash |
 |---|---|---|
-| `canoPi-Setup-1.0.0-win-x64.exe` | 114,085,663 | `F446E7ADDC2ACEC4026435114EFD8C7D77C3098B39A757FF824A75FBB95D93A4` |
-| `canoPi-source-1.0.0.zip` | 363,118 | `401D77B0179FF3A4E11E9D9CE14FCD423ED1FF7E555A50E2D77829DB8042E87B` |
-| `canoPi-windows-installer.zip` | 114,102,653 | `A8754533586DA6F0FA9F97D88A8D2F8EC47BD750DB9B615394DFCA56BA4AAC8A` |
+| `canoPi-Setup-1.0.0-win-x64.exe` | 114,110,571 | `E3B9066D5A86470DDFBC117FBED06674B98BE0F6E07B073EB4D2C3CD96499316` |
+| `canoPi-source-1.0.0.zip` | 420,406 | `980C31DC2A6ECB89CFCCE3E745351547A86ADA1C0F883932084CD46099C550FF` |
+| `canoPi-windows-installer.zip` | 114,127,569 | `F1B9993949D76441E793EFFADEFFD11F9D0AD5B7F168F363D75D9E28038247EB` |
 | `ENGINE-PROVENANCE.json` | 883 | `785353767590BB4E828344BB545F1681941DDDCC084FFF36261E996005A5ADAE` |
-| `BUILD-MANIFEST.json` | 3,245 | `BA998FE81CBFC4016F3DDB243D7BC3565539561D9A119A4F4262C6D2C232A405` |
+| `BUILD-MANIFEST.json` | 3,245 | `C0E056630EEF29F57759E09FD3A301CCE9E07B226C9A121E200899BA8693EBE7` |
 | `SHA256SUMS.txt` | 465 | *(covers the 5 primary artifacts above; byte-for-byte verified)* |
-| `RELEASE_TEST_REPORT.md` | 8,729 | *(evidence report generated last)* |
+| `RELEASE_TEST_REPORT.md` | 8,835 | *(evidence report generated last)* |
 
 Installer binary format: verified Windows PE (`MZ` header present, length > 100 MiB).
 
 `canoPi-windows-installer.zip` contains:
-- `canoPi-Setup-1.0.0-win-x64.exe` (114,085,663 bytes)
+- `canoPi-Setup-1.0.0-win-x64.exe` (114,110,571 bytes)
 - `ENGINE-PROVENANCE.json` (883 bytes)
 - `BUILD-MANIFEST.json` (3,245 bytes)
 - `SHA256SUMS.txt` (278 bytes, covering the 3 bundle files)
-
 `canoPi-source-1.0.0.zip` verified inclusion:
 - `src/app/CanoPi.jsx` (142,558 bytes, SHA256 `3f94504f728a4aea969f081e9e1a03fe20977f150b2eeae4fde3e38d72a0ed3d`): includes the committed bright user message bubble styling (`rgba(238,247,249,.88)` and light theme `rgba(255,255,255,.94)`).
 - `SOURCE-ZIP-README.txt` instructions for reproduction.
@@ -134,4 +133,5 @@ Honest scope per PRD / test matrix:
    - Interactive NSIS GUI Keep/Delete dialog (WU01 interactive, WU02 interactive Delete, WU03 Cancel) requires VM/human manual verification.
    - Static disposable-profile tests in `test-uninstall-data.ps1` verified ownership-marker checking and junction refusal; full OS-level multi-user / upgrade VM matrix rows (WU01-WU12, A-003, A-019-A-023) are recorded as `NOT RUN` pending dedicated clean-VM runs.
 3. **No fake provider turn**: Engine RPC v2 handshake smoke validated protocol exchange (`ready`, `protocol v2`, `open_session`, `get_state`). No simulated model generation or fake provider credentials were used.
-4. **No interactive browser / GUI session claimed**: Native WebView2 backend and PTY reaper passed automated unit/integration tests; live GUI interaction on host desktop was not executed.
+4. **No interactive browser session claimed**: Native WebView2 backend and PTY reaper passed automated unit/integration tests; live web browsing was not executed.
+5. **Verified Installed Launch Smoke**: Installed desktop executable was launched against pre-existing legacy `EBWebView` data root without marker; successfully claimed root without `Cannot claim nonempty unowned root` error; window screenshot captured into `release/evidence/canoPi-installed-launch.png` (687,606 bytes).

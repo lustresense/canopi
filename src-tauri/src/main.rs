@@ -234,24 +234,79 @@ fn app_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_local_data_dir().map_err(|e| e.to_string())
 }
 
+fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
+        meta.file_type().is_symlink() || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+fn is_recognized_legacy_entry(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        ".canopi-owner"
+            | "ebwebview"
+            | "webview2"
+            | "profile"
+            | "sessions"
+            | "browser-profiles"
+            | "agent"
+            | ".canopi.lock"
+            | "canopi-uninstall-receipt.json"
+            | "models.json"
+            | "models.yml"
+            | "models.yaml"
+            | "config.json"
+            | "auth.json"
+            | "canopi"
+    )
+}
+
 // Important upstream behavior: PI_CONFIG_DIR is a *directory name under home*,
 // not an arbitrary absolute path. PI_CODING_AGENT_DIR is absolute but affects
 // the default profile only. Profile migration and full isolation need smoke tests.
 fn owned_root(path: &Path, marker_name: &str) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
     let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if meta.file_type().is_symlink() { return Err("canoPi data root must not be a symlink".into()); }
+    if is_symlink_or_reparse(&meta) {
+        return Err(format!("canoPi data root must not be a symlink or reparse point: {}", path.display()));
+    }
     let marker = path.join(marker_name);
     if marker.exists() {
-        let existing = std::fs::read_to_string(&marker).map_err(|e| e.to_string())?;
-        if existing.trim() != "app.canopi.desktop" { return Err(format!("Existing unowned data root: {}", path.display())); }
-    } else {
-        // Refuse to claim an existing directory that contains unknown files.
-        // Markers are set before creating any managed child paths.
-        if std::fs::read_dir(path).map_err(|e| e.to_string())?.next().is_some() {
-            return Err(format!("Cannot claim nonempty unowned root: {}", path.display()));
+        let marker_meta = std::fs::symlink_metadata(&marker).map_err(|e| e.to_string())?;
+        if is_symlink_or_reparse(&marker_meta) {
+            return Err(format!("canoPi owner marker must not be a symlink or reparse point: {}", marker.display()));
         }
-        std::fs::write(marker, b"app.canopi.desktop\n").map_err(|e| e.to_string())?;
+        let existing = std::fs::read_to_string(&marker).map_err(|e| e.to_string())?;
+        if existing.trim() != "app.canopi.desktop" {
+            return Err(format!("Existing unowned data root: {}", path.display()));
+        }
+    } else {
+        let entries = std::fs::read_dir(path).map_err(|e| e.to_string())?;
+        let mut unrecognized = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let entry_path = entry.path();
+            let entry_meta = std::fs::symlink_metadata(&entry_path).map_err(|e| e.to_string())?;
+            if is_symlink_or_reparse(&entry_meta) {
+                return Err(format!("canoPi data root contains symlink or reparse entry: {}", entry_path.display()));
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_recognized_legacy_entry(&name) {
+                unrecognized.push(name);
+            }
+        }
+        if !unrecognized.is_empty() {
+            return Err(format!("Cannot claim nonempty unowned root: {}. Unrecognized entries: {}", path.display(), unrecognized.join(", ")));
+        }
+        std::fs::write(&marker, b"app.canopi.desktop\n").map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -657,7 +712,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Supervisor::default())
         .manage(native::TerminalManager::default())
-        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, native::pty_open, native::pty_write, native::pty_resize, native::pty_close, native::pty_signal, native::pty_list, native::pty_close_session, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models])
+        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, native::pty_open, native::pty_write, native::pty_resize, native::pty_close, native::pty_signal, native::pty_list, native::pty_close_session, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models, provider_save_key, provider_status, data_root_status, recover_data_root])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Only the main window owns full application shutdown. Auxiliary
@@ -768,6 +823,107 @@ mod tests {
         assert!(!panic_marker(b"ordinary stderr line"));
         assert!(!panic_marker(b""));
     }
+    #[test]
+    fn owned_root_empty_directory() {
+        let temp = std::env::temp_dir().join(format!("canopi_test_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        assert!(owned_root(&temp, ".canopi-owner").is_ok());
+        let marker = temp.join(".canopi-owner");
+        assert!(marker.is_file());
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(content.trim(), "app.canopi.desktop");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn owned_root_existing_marker() {
+        let temp = std::env::temp_dir().join(format!("canopi_test_marker_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let marker = temp.join(".canopi-owner");
+        std::fs::write(&marker, b"app.canopi.desktop\n").unwrap();
+        assert!(owned_root(&temp, ".canopi-owner").is_ok());
+
+        // Mismatched owner refusal
+        std::fs::write(&marker, b"other.app\n").unwrap();
+        let err = owned_root(&temp, ".canopi-owner").unwrap_err();
+        assert!(err.contains("Existing unowned data root"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn owned_root_recognized_legacy_migration() {
+        let temp = std::env::temp_dir().join(format!("canopi_test_legacy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::create_dir_all(temp.join("EBWebView")).unwrap();
+        std::fs::create_dir_all(temp.join("profile")).unwrap();
+        std::fs::create_dir_all(temp.join("sessions")).unwrap();
+        std::fs::write(temp.join("models.json"), b"{}").unwrap();
+        std::fs::write(temp.join(".canopi.lock"), b"").unwrap();
+
+        assert!(owned_root(&temp, ".canopi-owner").is_ok());
+        let marker = temp.join(".canopi-owner");
+        assert!(marker.is_file());
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(content.trim(), "app.canopi.desktop");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn owned_root_unrecognized_nonempty_refusal() {
+        let temp = std::env::temp_dir().join(format!("canopi_test_unrecognized_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("random_unowned_file.txt"), b"secret data").unwrap();
+
+        let res = owned_root(&temp, ".canopi-owner");
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("Cannot claim nonempty unowned root"));
+        assert!(err.contains("random_unowned_file.txt"));
+        assert!(!temp.join(".canopi-owner").exists());
+        assert!(temp.join("random_unowned_file.txt").exists());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn owned_root_symlink_or_reparse_refusal() {
+        let base = std::env::temp_dir().join(format!("canopi_test_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("link_dir");
+
+        #[cfg(windows)]
+        let created = {
+            let cmd = format!("cmd /C mklink /J \"{}\" \"{}\"", link.display(), target.display());
+            std::process::Command::new("cmd")
+                .args(["/C", &cmd])
+                .output()
+                .map(|o| o.status.success() && link.exists())
+                .unwrap_or(false)
+        };
+        #[cfg(not(windows))]
+        let created = std::os::unix::fs::symlink(&target, &link).is_ok();
+
+        if created {
+            let res = owned_root(&link, ".canopi-owner");
+            assert!(res.is_err());
+            let err = res.unwrap_err();
+            assert!(err.contains("symlink or reparse"));
+
+            let res_parent = owned_root(&base, ".canopi-owner");
+            assert!(res_parent.is_err());
+            let err_parent = res_parent.unwrap_err();
+            assert!(err_parent.contains("symlink or reparse"));
+        }
+        #[cfg(windows)]
+        let _ = std::process::Command::new("cmd").args(["/C", "rmdir", &link.to_string_lossy()]).output();
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 /// Narrow opt-in provider-definition import. Never copy OMP's auth SQLite DB,
@@ -806,4 +962,230 @@ fn provider_import_models(app: tauri::AppHandle, filename: String) -> Result<Val
     file.write_all(&data).map_err(|e|e.to_string())?;
     file.sync_all().map_err(|e|e.to_string())?;
     Ok(json!({"imported":filename,"scope":"models-only","restartRequired":true}))
+}
+
+#[tauri::command]
+fn provider_save_key(
+    app: tauri::AppHandle,
+    provider: String,
+    api_key: String,
+    base_url: Option<String>,
+    api: Option<String>,
+    model_id: Option<String>,
+) -> Result<Value, String> {
+    let prov = provider.trim().to_lowercase();
+    if prov.is_empty() || prov.len() > 64 || !prov.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("Invalid provider name (1..64 alphanumeric, dash, or underscore)".into());
+    }
+    let key = api_key.trim();
+    if key.is_empty() || key.len() > 4096 {
+        return Err("Invalid API key length (must be 1..4096 characters)".into());
+    }
+
+    let profile_dir = engine_profile_dir(&app)?;
+    let models_file = profile_dir.join("models.json");
+
+    let mut doc: Value = if models_file.exists() {
+        let raw = std::fs::read_to_string(&models_file).map_err(|e| format!("Failed to read models.json: {e}"))?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| json!({"providers": {}}))
+    } else {
+        json!({"providers": {}})
+    };
+
+    if !doc.is_object() {
+        doc = json!({"providers": {}});
+    }
+
+    let providers = doc.as_object_mut().unwrap().entry("providers").or_insert_with(|| json!({}));
+    if !providers.is_object() {
+        *providers = json!({});
+    }
+
+    let api_kind = api.as_deref().unwrap_or_else(|| match prov.as_str() {
+        "anthropic" => "anthropic-messages",
+        "openai" => "openai-chat",
+        "google" => "google-generative-ai",
+        _ => "openai-chat",
+    });
+
+    let mut entry = json!({
+        "apiKey": key,
+        "api": api_kind,
+    });
+
+    if let Some(url) = &base_url {
+        let u = url.trim();
+        if !u.is_empty() {
+            if u.len() > 2048 {
+                return Err("baseUrl exceeds maximum length (2048)".into());
+            }
+            entry["baseUrl"] = json!(u);
+        }
+    }
+
+    if let Some(mid) = &model_id {
+        let m = mid.trim();
+        if !m.is_empty() {
+            entry["models"] = json!([{
+                "id": m,
+                "name": m,
+                "api": api_kind
+            }]);
+        }
+    }
+
+    providers.as_object_mut().unwrap().insert(prov.clone(), entry);
+
+    let serialized = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    let tmp_file = profile_dir.join(format!(".models.json.tmp-{}", std::process::id()));
+    {
+        use std::io::Write as _;
+        let mut f = OpenOptions::new().write(true).create(true).truncate(true).open(&tmp_file).map_err(|e| e.to_string())?;
+        f.write_all(serialized.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp_file, &models_file).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_file);
+        format!("Failed to commit models.json: {e}")
+    })?;
+
+    Ok(json!({
+        "saved": true,
+        "provider": prov,
+        "restartRequired": true
+    }))
+}
+
+#[tauri::command]
+fn provider_status(app: tauri::AppHandle) -> Result<Value, String> {
+    let profile_dir = engine_profile_dir(&app)?;
+    let models_file = profile_dir.join("models.json");
+    if !models_file.exists() {
+        return Ok(json!({
+            "configured": false,
+            "providers": [],
+            "modelsFilePresent": false
+        }));
+    }
+
+    let raw = std::fs::read_to_string(&models_file).map_err(|e| e.to_string())?;
+    let val: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+    let mut configured_providers = Vec::new();
+
+    if let Some(providers) = val.get("providers").and_then(Value::as_object) {
+        for (name, pval) in providers {
+            let has_key = pval.get("apiKey").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false);
+            configured_providers.push(json!({
+                "id": name,
+                "hasKey": has_key,
+                "baseUrl": pval.get("baseUrl").and_then(Value::as_str),
+                "api": pval.get("api").and_then(Value::as_str)
+            }));
+        }
+    }
+
+    let configured = configured_providers.iter().any(|p| p.get("hasKey") == Some(&Value::Bool(true)));
+    Ok(json!({
+        "configured": configured,
+        "providers": configured_providers,
+        "modelsFilePresent": true
+    }))
+}
+
+#[tauri::command]
+fn data_root_status(app: tauri::AppHandle) -> Result<Value, String> {
+    let local = app_data_root(&app)?;
+    let config = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let home = app.path().home_dir().map_err(|e| e.to_string())?.join(".canopi");
+
+    let inspect_root = |name: &'static str, path: &Path| -> Value {
+        let exists = path.exists();
+        let marker = path.join(".canopi-owner");
+        let owned = if marker.exists() {
+            std::fs::read_to_string(&marker)
+                .map(|c| c.trim() == "app.canopi.desktop")
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let mut status = "ok";
+        let mut error = None;
+        let mut unrecognized = Vec::new();
+
+        if exists {
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if is_symlink_or_reparse(&meta) => {
+                    status = "symlink_refused";
+                    error = Some("Root is a symlink or reparse point".to_string());
+                }
+                Ok(_) => {
+                    if !owned {
+                        match std::fs::read_dir(path) {
+                            Ok(entries) => {
+                                for entry in entries.flatten() {
+                                    let entry_name = entry.file_name().to_string_lossy().into_owned();
+                                    if !is_recognized_legacy_entry(&entry_name) {
+                                        unrecognized.push(entry_name);
+                                    }
+                                }
+                                if !unrecognized.is_empty() {
+                                    status = "unrecognized_nonempty";
+                                    error = Some(format!("Unrecognized entries: {}", unrecognized.join(", ")));
+                                } else {
+                                    status = "legacy_recognized";
+                                }
+                            }
+                            Err(e) => {
+                                status = "error";
+                                error = Some(e.to_string());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    status = "error";
+                    error = Some(e.to_string());
+                }
+            }
+        } else {
+            status = "not_created";
+        }
+
+        json!({
+            "id": name,
+            "path": path.to_string_lossy(),
+            "exists": exists,
+            "owned": owned,
+            "status": status,
+            "unrecognized": unrecognized,
+            "error": error
+        })
+    };
+
+    let roots = vec![
+        inspect_root("local", &local),
+        inspect_root("config", &config),
+        inspect_root("home", &home),
+    ];
+    let ok = roots.iter().all(|r| {
+        let s = r.get("status").and_then(Value::as_str).unwrap_or("");
+        s == "ok" || s == "legacy_recognized" || s == "not_created"
+    });
+
+    Ok(json!({
+        "ok": ok,
+        "roots": roots
+    }))
+}
+
+#[tauri::command]
+fn recover_data_root(app: tauri::AppHandle) -> Result<Value, String> {
+    let local = app_data_root(&app)?;
+    owned_root(&local, ".canopi-owner")?;
+    let config = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    owned_root(&config, ".canopi-owner")?;
+    let home = app.path().home_dir().map_err(|e| e.to_string())?.join(".canopi");
+    owned_root(&home, ".canopi-owner")?;
+
+    data_root_status(app)
 }

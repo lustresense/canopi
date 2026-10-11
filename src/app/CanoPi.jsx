@@ -9,7 +9,7 @@ import { pickProject, runtimeInfo, startRuntime, sendRpc, answerUi, watchFrames,
 import { projectAssistantFrame } from '../runtime/live-projection.mjs';
 import { parseWorkspace, serializeWorkspace, WORKSPACE_KEY, WORKSPACE_KEY_V1, UI_DEFAULTS } from '../runtime/workspace.mjs';
 import { subagentFrameId, subagentFrameEvent, workerStateFromStatus, toolCallIdOf } from '../runtime/frame-model.mjs';
-import { createTerminal, writeTerminal, resizeTerminal, closeTerminal, watchTerminal, listTerminals, openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels } from '../runtime/native.js';
+import { createTerminal, writeTerminal, resizeTerminal, closeTerminal, watchTerminal, listTerminals, openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels, getProviderStatus, saveProviderKey, dataRootStatus, recoverDataRoot } from '../runtime/native.js';
 import {
   Folder, FolderOpen, SquarePen, Search, Kanban, Globe, Terminal, Settings, Sun, Moon, Menu, X, Plus,
   ChevronRight, ChevronDown, ChevronUp, Columns2, Maximize2, Minimize2, ArrowLeft, ArrowRight, ArrowUp,
@@ -637,7 +637,8 @@ export default function CanoPi() {
   const [confirmS, setConfirmS] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [stale, setStale] = useState(0);
-
+  const [providerConfig, setProviderConfig] = useState({ configured: false, providers: [], modelsFilePresent: false });
+  const [dataRootIssue, setDataRootIssue] = useState(null);
   const persistTimer = useRef(null);
   useEffect(() => {
     if (typeof localStorage === 'undefined') return undefined;
@@ -653,7 +654,55 @@ export default function CanoPi() {
     }, 300);
     return () => clearTimeout(persistTimer.current);
   }, [db, theme, view, collapsed, dock, homeProject]);
-  useEffect(() => { runtimeInfo().then(x => { setEngine(x); setConn(x.available ? 'idle' : 'disconnected'); }).catch(e => { setEngine({available:false,error:String(e)}); setConn('disconnected'); }); }, []);
+  const refreshProviderStatus = useCallback(async () => {
+    try {
+      const res = await getProviderStatus();
+      if (res) setProviderConfig(res);
+    } catch { /* desktop bridge only */ }
+  }, []);
+  const checkDataRoot = useCallback(async () => {
+    try {
+      const res = await dataRootStatus();
+      if (res && !res.ok) setDataRootIssue(res);
+      else setDataRootIssue(null);
+    } catch { /* desktop bridge only */ }
+  }, []);
+  const handleRecoverDataRoot = async () => {
+    try {
+      const res = await recoverDataRoot();
+      if (res && res.ok) {
+        toast('canoPi data root recovered.');
+        setDataRootIssue(null);
+        const info = await runtimeInfo();
+        setEngine(info);
+        setConn(info.available ? 'idle' : 'disconnected');
+      } else {
+        toast('Root recovery refused: ' + (res?.error || 'unrecognized files present. No files deleted.'));
+      }
+    } catch (e) {
+      toast('Root recovery failed: ' + String(e.message || e));
+    }
+  };
+  const saveApiKey = async ({ provider, apiKey, baseUrl, api, modelId }) => {
+    if (!apiKey || !apiKey.trim()) {
+      toast('Please enter a valid API key.');
+      return false;
+    }
+    try {
+      await saveProviderKey(provider, apiKey.trim(), baseUrl ? baseUrl.trim() : undefined, api ? api.trim() : undefined, modelId ? modelId.trim() : undefined);
+      toast(`API key for ${provider} saved to canoPi profile.`);
+      await refreshProviderStatus();
+      return true;
+    } catch (e) {
+      toast('Failed to save API key: ' + String(e.message || e));
+      return false;
+    }
+  };
+  useEffect(() => {
+    runtimeInfo().then(x => { setEngine(x); setConn(x.available ? 'idle' : 'disconnected'); }).catch(e => { setEngine({available:false,error:String(e)}); setConn('disconnected'); });
+    refreshProviderStatus();
+    checkDataRoot();
+  }, [refreshProviderStatus, checkDataRoot]);
 
   const appRef = useRef(null), workRef = useRef(null), scrollRef = useRef({}), busyRef = useRef({}), logic = useRef({}), pendingSync = useRef(new Map());
   const uiRef = useRef({}); uiRef.current = { sid, view, insp, inspTab, conn, selTask, mode };
@@ -741,7 +790,7 @@ export default function CanoPi() {
     const project=dbRef.current.projects.find(p=>p.id===s.project);
     if(!project || !engine.available) { toast(engine.error||'Bundled OMP unavailable'); return; }
     try { const opened=await startRuntime(id,project.path); setConn('connected',id); if(opened.state) applyRuntimeState(id,opened.state); else await refreshState(id); await bootSession(id); await refreshHistory(id); }
-    catch(e) { setConn('disconnected',id); toast('Session failed: '+String(e.message||e)); }
+    catch(e) { setConn('disconnected',id); const msg=String(e.message||e); if(msg.includes('unowned root')) checkDataRoot(); toast('Session failed: '+msg); }
   };
   const setView = v => { setViewS(v); closeRail(); };
   const openInspector = (aid, tab = 'transcript', sidx) => {
@@ -781,7 +830,7 @@ export default function CanoPi() {
       await bootSession(id);
       pushMsg(id, 'main', U(t));
       await mainReply(id, t);
-    } catch (e) { setConn('disconnected',id); setAgent(id,'main',{state:'failed',activity:'Runtime failed to start'}); pushMsg(id,'main',N('Engine error: '+String(e.message||e))); toast('Cannot start cnp: '+String(e.message||e)); }
+    } catch (e) { setConn('disconnected',id); const msg=String(e.message||e); if(msg.includes('unowned root')) checkDataRoot(); setAgent(id,'main',{state:'failed',activity:'Runtime failed to start'}); pushMsg(id,'main',N('Engine error: '+msg)); toast('Cannot start cnp: '+msg); }
   };
 
   /* Native adapters. Browser surfaces are real per-agent WebView2 windows; tool-driven
@@ -984,11 +1033,13 @@ export default function CanoPi() {
   const stopWorker = async aid => { try { await sendRpc(sid,{type:'cancel_subagent',subagentId:aid}); void queueWorkersSync(sid, 0); } catch(e) { toast(String(e.message||e)); } };
   const disconnect = () => { setConn('disconnected',sid); };
   const reconnect = async () => {
+    checkDataRoot();
+    refreshProviderStatus();
     if (!sid) { const info=await runtimeInfo(); setEngine(info); setConn(info.available?'idle':'disconnected',null); return; }
     const project=dbRef.current.projects.find(p=>p.id===dbRef.current.sessions[sid]?.project);
     if (!project) return;
     try { const result=await startRuntime(sid,project.path); setConn('connected',sid); if(result.state) applyRuntimeState(sid,result.state); else await refreshState(sid); await bootSession(sid); await refreshHistory(sid); }
-    catch(e) { setConn('disconnected',sid); toast(String(e.message||e)); }
+    catch(e) { setConn('disconnected',sid); const msg=String(e.message||e); if(msg.includes('unowned root')) checkDataRoot(); toast(msg); }
   };
   /* Session-scoped worker registry entry, created on the first frame that
      mentions the id so early subagent events land in the right transcript. */
@@ -1150,6 +1201,7 @@ export default function CanoPi() {
   const A = {
     gsap, db, sid, ss, view, insp, inspTab, conn, engine, availableModels, runtimeCommands, liveModel, thinkingLevels, thinkingLevel, runtimeDialog, changeModel, setThinking, answerDialog, importProviderDefinitions, dock, dragging, mode, shellId: curShellId, phase, group, selTask, colTab, drafts, theme, railOpen, collapsed, homeProject, stale,
     drawer, palette, confirmS, dockTabs, dockHeight, dockMax, workRef, scrollRef, eff,
+    providerConfig, refreshProviderStatus, saveApiKey, dataRootIssue, handleRecoverDataRoot,
     setDraft, setPhase, setGroup, setSelTask, setColTab, setMode, setShellId, setDock, setDragging, setRailOpen, setCollapsed, setHomeProject, setDrawer, setPalette, setConn, setConfirmS,
     toast, confirm, mutate, updateSessionLight, pushMsg, patchMsg, addTrace, setAgent, setTodos, goHome, openSession, setView, openInspector, closeInspector, focusTrace, toggleTheme, newSession: goHome, openFolder, startSession,
     shellExec, shellInterrupt, newShell, closeShell, mainReply, stopMain, steer, stopWorker, disconnect, reconnect, setStale
@@ -1161,7 +1213,15 @@ export default function CanoPi() {
         <style>{CSS}</style>
         <div className="app" ref={appRef}>
           <Topbar />
-          {conn === 'disconnected' && <div className="banner" role="status"><Unplug size={16} /><span><b>canoPi engine unavailable.</b> {engine.error || "The engine is disconnected."}</span><span className="grow" /><button className="btn sm primary" onClick={reconnect}>Reconnect</button></div>}
+          {dataRootIssue && (
+            <div className="banner" role="status" style={{ borderLeftColor: '#d66' }}>
+              <Unplug size={16} />
+              <span><b>Data root ownership recovery needed:</b> {dataRootIssue.roots?.find(r => r.error)?.error || 'Existing data root lacks canoPi owner marker.'}</span>
+              <span className="grow" />
+              <button className="btn sm primary" onClick={handleRecoverDataRoot}>Recover data root</button>
+            </div>
+          )}
+          {conn === 'disconnected' && !dataRootIssue && <div className="banner" role="status"><Unplug size={16} /><span><b>canoPi engine unavailable.</b> {engine.error || "The engine is disconnected."}</span><span className="grow" /><button className="btn sm primary" onClick={reconnect}>Reconnect</button></div>}
           <Rail />
           <div className={'scrim-rail' + (railOpen ? ' on' : '')} onClick={closeRail} />
           <main className="work" ref={workRef} id="main">
@@ -1230,7 +1290,7 @@ function Rail() {
       <nav className="tree" aria-label="Projects, sessions and agents">
         {db.projects.map(p => <ProjectNode key={p.id} p={p} />)}
       </nav>
-      <div className="rail-f"><small>OMP engine · local session</small></div>
+      <div className="rail-f"><small>canoPi engine · local session</small></div>
     </aside>
   );
 }
@@ -1308,7 +1368,7 @@ function Home() {
             <button type="button" className="ibtn" onClick={A.openFolder} aria-label="Open a project folder" title="Open a project folder"><FolderPlus size={17} /></button>
             <select aria-label="Project for the new session" value={proj ? proj.id : ''} onChange={e => A.setHomeProject(e.target.value)}>{A.db.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
             <span className="grow" />
-            <button type="button" className="chip" onClick={() => A.setDrawer('models')}>{A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : 'Model from OMP'}</button>
+            <button type="button" className="chip" onClick={() => A.setDrawer('models')}>{A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : (A.providerConfig?.configured ? (A.providerConfig.providers?.[0]?.id + ' (ready)') : 'Model setup')}</button>
             <button type="submit" className="send" aria-label="Start session" disabled={!draft.trim() || !proj}><ArrowUp size={17} /></button>
           </div>
         </form>
@@ -1316,6 +1376,11 @@ function Home() {
         {!A.db.projects.length && (
           <div className="offline" role="status"><b>No project open yet.</b> Open a project folder to create a canoPi session inside it. The folder stays on this PC; canoPi only stores its name and path as UI metadata.
             <div className="btns" style={{ marginTop: 8 }}><button type="button" className="btn primary" onClick={A.openFolder}>Open project folder</button></div>
+          </div>
+        )}
+        {A.db.projects.length > 0 && !A.providerConfig?.configured && (
+          <div className="offline" role="status"><b>API key setup required.</b> Configure an API key (Anthropic, OpenAI, OpenRouter, or custom) in your isolated canoPi profile before running a session.
+            <div className="btns" style={{ marginTop: 8 }}><button type="button" className="btn primary" onClick={() => A.setDrawer('models')}>Configure API Key</button></div>
           </div>
         )}
         {A.db.projects.length > 0 && !A.engine.available && (
@@ -1437,7 +1502,7 @@ function Composer() {
         <button type="submit" className="send" aria-label={shell ? 'Run command' : 'Send message'} disabled={(!shell && off) || (shell && !sh) || !value.trim()}><ArrowUp size={17} /></button>
       </div>
       <div className="c-meta">
-        <button type="button" className="chip" onClick={() => A.setDrawer('models')}>{A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : 'Model from OMP'}</button>
+        <button type="button" className="chip" onClick={() => A.setDrawer('models')}>{A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : (A.providerConfig?.configured ? (A.providerConfig.providers?.[0]?.id + ' (ready)') : 'Model setup')}</button>
         <label>Thinking <select aria-label="Thinking level" disabled={!(A.thinkingLevels && A.thinkingLevels.length)} value={A.thinkingLevel ?? ''} onChange={e => A.setThinking(e.target.value)}>
           {(A.thinkingLevels && A.thinkingLevels.length ? A.thinkingLevels : [A.thinkingLevel]).filter(Boolean).map(o => <option key={o} value={o}>{String(o).charAt(0).toUpperCase()+String(o).slice(1)}</option>)}
         </select></label>
@@ -1445,7 +1510,7 @@ function Composer() {
       </div>
       {slash.list.length > 0 && (
         <div className="slash" role="listbox" aria-label="Commands">
-          <h5>Commands reported by OMP</h5>
+          <h5>Commands reported by canoPi engine</h5>
           {slash.list.map((c, i) => <div key={c.n} id={'sl' + i} className="it" role="option" aria-selected={i === slash.idx} aria-disabled={!c.ok} onMouseDown={e => { e.preventDefault(); pick(i, false); }}><b>{c.n}</b><span>{c.ok ? c.d : 'Unavailable: ' + c.why}</span></div>)}
         </div>
       )}
@@ -1762,6 +1827,99 @@ function ConnGraph() {
 
 function Row2({ children, sub, right }) { return <div className="row2"><div>{children}{sub && <small>{sub}</small>}</div>{right}</div>; }
 function Need() { return <p className="lede">Open a session first. This section is about what the agents in a session are doing.</p>; }
+function ProviderSetupSection() {
+  const A = useApp();
+  const [provider, setProvider] = useState('anthropic');
+  const [keyInput, setKeyInput] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [modelId, setModelId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const configured = A.providerConfig?.providers || [];
+  const hasCustom = provider === 'custom' || provider === '9router';
+  const onSave = async e => {
+    e.preventDefault();
+    if (!keyInput.trim()) { A.toast('Enter an API key.'); return; }
+    setSaving(true);
+    const ok = await A.saveApiKey({
+      provider,
+      apiKey: keyInput,
+      baseUrl: hasCustom ? baseUrl : undefined,
+      modelId: hasCustom ? modelId : undefined
+    });
+    setSaving(false);
+    if (ok) setKeyInput('');
+  };
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <h4>Provider setup (API key first)</h4>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6, padding: '10px 12px', background: 'var(--glass-2)', border: '1px solid var(--glass-line)', borderRadius: 'var(--r)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <label style={{ fontSize: 13, fontWeight: 600 }}>Provider</label>
+          <select aria-label="Select AI provider" value={provider} onChange={e => setProvider(e.target.value)} style={{ background: 'var(--glass-3)', border: '1px solid var(--glass-line)', borderRadius: 'var(--r)', padding: '4px 8px', fontSize: 13 }}>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openai">OpenAI (GPT)</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="custom">Custom (OpenAI-compatible)</option>
+            <option value="9router">9Router (optional local proxy)</option>
+          </select>
+        </div>
+        {hasCustom && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Base URL</label>
+            <input
+              type="text"
+              aria-label="Base URL"
+              placeholder={provider === '9router' ? 'http://127.0.0.1:9090/v1' : 'https://api.example.com/v1'}
+              value={baseUrl}
+              onChange={e => setBaseUrl(e.target.value)}
+              style={{ background: 'var(--glass-3)', border: '1px solid var(--glass-line)', borderRadius: 'var(--r)', padding: '5px 8px', fontSize: 13 }}
+            />
+          </div>
+        )}
+        {hasCustom && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Model ID (optional)</label>
+            <input
+              type="text"
+              aria-label="Model ID"
+              placeholder="e.g. llama-3.3-70b"
+              value={modelId}
+              onChange={e => setModelId(e.target.value)}
+              style={{ background: 'var(--glass-3)', border: '1px solid var(--glass-line)', borderRadius: 'var(--r)', padding: '5px 8px', fontSize: 13 }}
+            />
+          </div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <label style={{ fontSize: 12, color: 'var(--text-3)' }}>API Key</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label="API Key"
+              placeholder={provider === 'anthropic' ? 'sk-ant-...' : provider === 'openai' ? 'sk-...' : 'API key'}
+              value={keyInput}
+              onChange={e => setKeyInput(e.target.value)}
+              style={{ flex: 1, background: 'var(--glass-3)', border: '1px solid var(--glass-line)', borderRadius: 'var(--r)', padding: '5px 8px', fontSize: 13 }}
+            />
+            <button className="btn sm primary" disabled={saving || !keyInput.trim()} onClick={onSave}>Save Key</button>
+          </div>
+        </div>
+      </div>
+      {configured.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <small style={{ color: 'var(--text-3)', display: 'block', marginBottom: 4 }}>Configured in canoPi profile:</small>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {configured.map(p => (
+              <span key={p.id} className="chip" style={{ fontSize: 11, borderColor: 'var(--accent)' }}>
+                {p.id}: {p.hasKey ? 'Key saved' : 'No key'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 function DrawerBody({ sec }) {
   const A = useApp(); const ss = A.ss;
   const close = () => A.setDrawer(null);
@@ -1771,14 +1929,14 @@ function DrawerBody({ sec }) {
     case 'agents': return !ss ? <Need /> : (<><h3>Agents</h3><p className="lede">One session, one main agent, and the workers it started. Only the main agent starts workers.</p>
       {ss.order.map(id => { const a = ss.agents[id], b = ss.browsers[id]; return <Row2 key={id} sub={`${a.activity}. Browser: ${b ? b.state : 'not created'}.`} right={<button className="btn sm" onClick={() => { close(); setTimeout(() => (id === 'main' ? (A.closeInspector(), A.setView('conv')) : A.openInspector(id, 'transcript')), 0); }}>Open</button>}><b>{a.name}</b> <StateTag s={A.eff(a)} />{a.flag && <> <span className="flag">Unsupported depth</span></>}</Row2>; })}</>);
     case 'connections': return !ss ? <Need /> : (<><h3>Connections</h3><p className="lede">Only links canoPi really knows about: the main agent, its workers, and the activity log and browser each one owns.</p><ConnGraph /><p className="lede" style={{ marginTop: 8 }}>Your own shells belong to no agent. An activity log is not a terminal.</p></>);
-    case 'models': return (<><h3>Models and roles</h3><p className="lede">Models reported by the current OMP process. Credentials stay inside OMP.</p>
-      <h4>Active model</h4><Row2 sub={ss ? 'Changes apply to this session only' : 'Open a session first'} right={<select aria-label="OMP model" disabled={!ss || !A.availableModels.length} value={A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : ''} onChange={e=>A.changeModel(e.target.value)}>
+    case 'models': return (<><h3>Models and roles</h3><p className="lede">Models reported by the canoPi engine. API keys are stored in your isolated canoPi profile.</p>
+      <ProviderSetupSection />
+      <h4>Active session model</h4><Row2 sub={ss ? 'Changes apply to this session only' : 'Open a session first'} right={<select aria-label="canoPi model" disabled={!ss || !A.availableModels.length} value={A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : ''} onChange={e=>A.changeModel(e.target.value)}>
         <option value="">{A.availableModels.length ? 'Choose model' : (ss ? 'No models reported by this session' : 'Open a session to load models')}</option>
         {A.availableModels.map((m,i)=><option key={i} value={m.provider+'/'+(m.id||m.modelId)}>{m.provider}/{m.id||m.modelId}</option>)}
       </select>}>Model</Row2>
-      <h4>Thinking</h4><Row2 sub="Reported by OMP get_state; change it from the composer" right={<b>{ss?.thinkingLevel ?? '—'}</b>}>Active level</Row2>
+      <h4>Thinking</h4><Row2 sub="Reported by get_state; change it from the composer" right={<b>{ss?.thinkingLevel ?? '—'}</b>}>Active level</Row2>
       <h4>Provider setup</h4><Row2 sub="Optional, models.yml only; copies provider definitions without changing OMP. Existing canoPi config is never overwritten." right={<button className="btn sm" disabled={!!ss} onClick={A.importProviderDefinitions}>Import OMP models</button>}>Import provider definitions</Row2>
-      <Row2 sub="Provider login and account credentials still require OMP authentication; stored auth databases are not copied." right={<span className="na">Not migrated</span>}>Credentials</Row2>
     </>);
 
 

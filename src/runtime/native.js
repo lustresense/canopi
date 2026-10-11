@@ -77,3 +77,19 @@ export async function previewOmpModels() {
 export async function importOmpModels(filename) {
   requireDesktop();return invoke('provider_import_models',{filename});
 }
+
+/** Provider API key persistence and configuration status in isolated canoPi profile. */
+export async function getProviderStatus() {
+  requireDesktop(); return invoke('provider_status');
+}
+export async function saveProviderKey(provider, apiKey, baseUrl, api, modelId) {
+  requireDesktop(); return invoke('provider_save_key', { provider, apiKey, baseUrl, api, modelId });
+}
+
+/** Data root diagnostics and safe recovery for unowned/legacy canoPi roots. */
+export async function dataRootStatus() {
+  requireDesktop(); return invoke('data_root_status');
+}
+export async function recoverDataRoot() {
+  requireDesktop(); return invoke('recover_data_root');
+}

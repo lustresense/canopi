@@ -46,6 +46,11 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       },
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.sectigo.com",
+      "tsp": true,
+      "signCommand": null,
       "nsis": {
         "displayLanguageSelector": false,
         "installMode": "currentUser",

@@ -14,6 +14,7 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $pin = '2a2c6dcbbb558c0f8145f67f28b3370984f2bf60'
 $upstream = Join-Path $root 'upstream\oh-my-pi'
 $patchFile = Join-Path $root 'patches\omp\0001-cnp-engine-artifact-identity.patch'
+$transportPatchFile = Join-Path $root 'patches\omp\0002-canoPi-transport-endpoint-security.patch'
 $engineDir = Join-Path $root 'src-tauri\resources\engine'
 
 function Must([string]$step, [scriptblock]$block) {
@@ -22,6 +23,7 @@ function Must([string]$step, [scriptblock]$block) {
     if ($LASTEXITCODE -ne 0) { throw "$step failed with exit code $LASTEXITCODE" }
 }
 if (-not (Test-Path -LiteralPath $patchFile -PathType Leaf)) { throw "Tracked fork patch missing: $patchFile" }
+if (-not (Test-Path -LiteralPath $transportPatchFile -PathType Leaf)) { throw "Tracked transport patch missing: $transportPatchFile" }
 foreach ($cmd in @('git', 'node', 'bun', 'python')) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { throw "Missing $cmd prerequisite" }
 }
@@ -35,12 +37,48 @@ Must 'Reset dedicated pinned checkout' { git -C $upstream reset --hard $pin }
 $current = (git -C $upstream rev-parse HEAD).Trim()
 if ($current -cne $pin) { throw "Wrong upstream commit $current" }
 Must 'Apply canoPi fork source patch' { node (Join-Path $root 'scripts\patch-omp.mjs') $upstream }
-# The tracked patch is the provenance of record: fail on any drift between it
-# and what patch-omp.mjs actually applied to this checkout.
-Must 'Mark fork marker for diff' { git -C $upstream add -N CANOPI_SOURCE_FORK.md }
-$actual = (git -C $upstream diff) -join "`n"
-$expected = (Get-Content -LiteralPath $patchFile -Raw) -replace "`r`n", "`n"
-if (($actual.TrimEnd() + "`n") -cne $expected.TrimEnd()) { throw 'Applied fork diff drifted from patches/omp/0001-cnp-engine-artifact-identity.patch' }
+# The tracked patch is the human-review provenance record. Validate its required
+# source edits structurally; do not compare `git diff` rendering, which can be
+# changed by a workstation's configured external diff formatter.
+Must 'Verify tracked fork patch record' {
+    $record = Get-Content -LiteralPath $patchFile -Raw
+    $transportRecord = Get-Content -LiteralPath $transportPatchFile -Raw
+    foreach ($required in @(
+        'packages/coding-agent/scripts/build-binary.ts',
+        'cnp-engine-${crossBuild.id}',
+        'packages/coding-agent/src/main.ts',
+        'mode !== "rpc" && mode !== "rpc-ui"'
+    )) {
+        if (-not $record.Contains($required)) { throw "Tracked fork patch missing required edit: $required" }
+    }
+    foreach ($required in @(
+        'packages/ai/src/utils/transport-fetch.ts',
+        'CANOPI_STRICT_ENDPOINTS',
+        'CANOPI_TRUSTED_ENDPOINTS_PATH',
+        'redirect: "manual"'
+    )) {
+        if (-not $transportRecord.Contains($required)) { throw "Tracked transport patch missing required edit: $required" }
+    }
+}
+Must 'Verify applied fork source' {
+    $binarySource = Get-Content -LiteralPath (Join-Path $upstream 'packages\coding-agent\scripts\build-binary.ts') -Raw
+    $mainSource = Get-Content -LiteralPath (Join-Path $upstream 'packages\coding-agent\src\main.ts') -Raw
+    $transportSource = Get-Content -LiteralPath (Join-Path $upstream 'packages\ai\src\utils\transport-fetch.ts') -Raw
+    if (-not $binarySource.Contains('const outName = crossBuild ? `cnp-engine-${crossBuild.id}` : "cnp-engine";')) {
+        throw 'Applied binary identity patch missing'
+    }
+    if (-not $mainSource.Contains('if (!isInteractive && mode !== "rpc" && mode !== "rpc-ui" && !session.model) {')) {
+        throw 'Applied providerless RPC bootstrap patch missing'
+    }
+    if (-not $transportSource.Contains('CANOPI_STRICT_ENDPOINTS')) {
+        throw 'Applied transport security patch missing'
+    }
+    $changed = @(& git -C $upstream diff --name-only)
+    $expectedChanged = @('packages/ai/src/utils/transport-fetch.ts', 'packages/coding-agent/scripts/build-binary.ts', 'packages/coding-agent/src/main.ts')
+    if (@(Compare-Object $changed $expectedChanged).Count -ne 0) {
+        throw ('Applied fork source changed unexpected files: ' + ($changed -join ', '))
+    }
+}
 $buildEnv = @{}
 if ($RustToolchain -ne '') { $buildEnv['RUSTUP_TOOLCHAIN'] = $RustToolchain }
 # GNU-toolchain fallback (runner has no VS C++ Build Tools): rustup's
@@ -58,7 +96,12 @@ try {
     if ($buildEnv.Count -gt 0) { foreach ($k in $buildEnv.Keys) { Set-Item -Path "env:$k" -Value $buildEnv[$k] } }
     Must 'Install upstream dependencies' { bun install }
     Must 'Compile native engine components' { bun run build:native }
-    Must 'Compile cnp engine from forked source' { bun --cwd packages/coding-agent run build }
+    Must 'Remove stale cnp engine output' {
+        $staleDist = Join-Path $upstream 'packages\coding-agent\dist'
+        Remove-Item -LiteralPath (Join-Path $staleDist 'cnp-engine.exe') -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $staleDist 'cnp-engine') -Force -ErrorAction SilentlyContinue
+    }
+    Must 'Compile cnp engine from forked source' { bun run --cwd packages/coding-agent build }
 } finally { Pop-Location }
 $dist = Join-Path $upstream 'packages\coding-agent\dist'
 $found = @(Get-ChildItem $dist -File | Where-Object { $_.Name -in @('cnp-engine.exe', 'cnp-engine') })

@@ -22,3 +22,16 @@ index 28ffeff..e3f5ec6 100644
  	const outputPath = path.join(packageDir, "dist", outName);
  	// Generate inside the try so the finally always restores the empty checked-in
  	// placeholders (stats client archive, docs index) even on failure.
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 7d67ef4..04bebbb 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -2476,7 +2476,7 @@ export async function runRootCommand(
+ 				notifs.push({ kind: "error", message: modelRegistryError.message });
+ 			}
+ 
+-			if (!isInteractive && !session.model) {
++			if (!isInteractive && mode !== "rpc" && mode !== "rpc-ui" && !session.model) {
+ 				if (modelRegistryError) {
+ 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
+ 				}

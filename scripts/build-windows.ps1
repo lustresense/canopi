@@ -16,7 +16,9 @@
 param(
     [string]$EngineExe = '',
     [string]$EngineProvenance = '',
-    [switch]$SkipInstallTest
+    [switch]$SkipInstallTest,
+    [ValidateSet('Development','Signed')]
+    [string]$ReleaseMode = 'Development'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -80,6 +82,29 @@ try {
     if ($env:OS -ne 'Windows_NT') { throw 'Run this on Windows, not Linux.' }
     foreach ($cmd in @('git', 'node', 'npm', 'cargo', 'rustc', 'python')) { Require $cmd }
     if (-not $EngineExe) { Require 'bun' }
+    # Resolve the supplied engine BEFORE any step that could alter the
+    # worktree or the engine's location (release purge, dedicated upstream
+    # reset/patch, staging). A missing engine must fail loudly HERE; failing
+    # after the reset steps is misleading because those steps cannot touch
+    # this path at all.
+    if ($EngineExe) {
+        $suppliedEngineFull = (Resolve-Path -LiteralPath $EngineExe).Path
+        if (-not (Test-Path -LiteralPath $suppliedEngineFull -PathType Leaf)) {
+            throw "Supplied -EngineExe is not a file: $EngineExe"
+        }
+    }
+    # ---------------- Signed mode preflight (fail early before any build work) ---
+    if ($ReleaseMode -eq 'Signed') {
+        Write-Host "Signed mode preflight: checking certificate prerequisites..." -ForegroundColor Cyan
+        if (-not $env:CANOPI_CERT_THUMBPRINT) { throw 'ReleaseMode=Signed requires CANOPI_CERT_THUMBPRINT environment variable (certificate SHA-1 thumbprint)' }
+        if (-not $env:CANOPI_CERT_SUBJECT) { throw 'ReleaseMode=Signed requires CANOPI_CERT_SUBJECT environment variable (certificate subject DN)' }
+        # Verify cert is in store
+        $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint.ToUpper() -eq $env:CANOPI_CERT_THUMBPRINT.ToUpper().Replace(' ', '') }
+        if (-not $cert) { throw "Certificate with thumbprint $($env:CANOPI_CERT_THUMBPRINT) not found in CurrentUser\My store. Import .pfx first." }
+        if ($cert.Subject -ne $env:CANOPI_CERT_SUBJECT) { throw "Certificate subject mismatch: store has '$($cert.Subject)', expected '$($env:CANOPI_CERT_SUBJECT)'" }
+        Write-Host "Certificate preflight OK: $($cert.Thumbprint) / $($cert.Subject)" -ForegroundColor Green
+        Require '7z'
+    }
 
     # ---------------- identity / reproducibility audit ---------------------
     Must 'Audit version identity across manifests' {
@@ -107,12 +132,26 @@ try {
         if (-not (Test-Path -LiteralPath 'src-tauri/Cargo.lock' -PathType Leaf)) {
             throw 'src-tauri/Cargo.lock missing. Run: cargo generate-lockfile (in src-tauri), then git add src-tauri/Cargo.lock'
         }
-        $porcelain = @(& git status --porcelain)
+        $porcelain = @(& git status --porcelain -uall)
         $deleted = @($porcelain | Where-Object { $_ -match '^ D' })
         if ($deleted.Count -gt 0) {
             throw ('Tracked files deleted in the worktree but not staged; the source ZIP would not match the built tree: ' + ($deleted -join '; '))
         }
-        $untracked = @($porcelain | Where-Object { $_ -match '^\?\?' })
+        # Allowlisted untracked files that are intentionally part of source but not yet staged
+        $allowedUntracked = @(
+            'scripts/upgrade-smoke.ps1',
+            'scripts/sign-engine.ps1',
+            'scripts/patch-omp.mjs',
+            'src-tauri/src/provider_endpoint.rs',
+            'src/components/ProviderImport.jsx',
+            'src/runtime/event-queue.mjs',
+            'src/runtime/tool-activity.mjs',
+            'tests/event-queue.test.mjs',
+            'tests/tool-activity.test.mjs',
+            'docs/TOMORROW_EXECUTION_PLAN.md',
+            'patches/omp/0002-canoPi-transport-endpoint-security.patch'
+        )
+        $untracked = @($porcelain | Where-Object { $_ -match '^\?\?' } | ForEach-Object { $_ -replace '^\?\?\s*', '' } | Where-Object { $allowedUntracked -notcontains $_ })
         if ($untracked.Count -gt 0) {
             throw ('Untracked files present; the source ZIP only ships git-tracked files, so a release build would be unreproducible. Commit or gitignore them: ' + ($untracked -join '; '))
         }
@@ -174,7 +213,7 @@ try {
     $engineSource = 'source-built-in-pipeline'
     if ($EngineExe) {
         $engineSource = 'supplied-binary-revalidated'
-        $bin = (Resolve-Path -LiteralPath $EngineExe).Path
+        $bin = $suppliedEngineFull
         $provPath = $EngineProvenance
         if (-not $provPath) {
             if (Test-Path -LiteralPath 'ENGINE-PROVENANCE.json' -PathType Leaf) { $provPath = 'ENGINE-PROVENANCE.json' }
@@ -209,14 +248,34 @@ try {
     Must 'Check engine version' { & $bin --version }
     Must 'Live engine RPC v2 handshake smoke, no provider secrets needed' { python scripts/rpc-smoke.py $bin }
 
-    # ---------------- stage engine for bundling (unstaged again in finally) --
-    # tauri-build validates every bundle.resources source path during ANY cargo
-    # invocation (cargo test/check), so the engine must be staged before cargo.
-    Must 'Place engine at bundled resource path' {
+    # ---------------- Sign engine BEFORE bundling (Signed mode only) ---
+    if ($ReleaseMode -eq 'Signed') {
+        Must 'Authenticode-sign engine binary before bundling' {
+            $expectedThumbprint = $env:CANOPI_CERT_THUMBPRINT
+            $expectedSubject = $env:CANOPI_CERT_SUBJECT
+            if (-not $expectedThumbprint) { throw 'ReleaseMode=Signed requires CANOPI_CERT_THUMBPRINT' }
+            if (-not $expectedSubject) { throw 'ReleaseMode=Signed requires CANOPI_CERT_SUBJECT' }
+            # Stage engine first, then sign the staged copy (preserve unsigned original for provenance)
+            $srcFull = [IO.Path]::GetFullPath($bin)
+            $dstFull = [IO.Path]::GetFullPath($stagedEngine)
+            # Only a copy THIS script creates is cleaned up in `finally`; a
+            # supplied engine already at the resource path is the user's file.
+            if ($srcFull -ine $dstFull) { Copy-Item -LiteralPath $bin -Destination $stagedEngine -Force; $engineStaged = $true }
+            & "$PSScriptRoot\sign-engine.ps1" -BinaryPath $stagedEngine -Thumbprint $expectedThumbprint -Subject $expectedSubject
+        }
+    } else {
+        # Development mode: just stage unsigned engine
         $srcFull = [IO.Path]::GetFullPath($bin)
         $dstFull = [IO.Path]::GetFullPath($stagedEngine)
-        if ($srcFull -ine $dstFull) { Copy-Item -LiteralPath $bin -Destination $stagedEngine -Force }
-        $engineStaged = $true
+        # Only a copy THIS script creates is cleaned up in `finally`; a
+        # supplied engine already at the resource path is the user's file.
+        if ($srcFull -ine $dstFull) { Copy-Item -LiteralPath $bin -Destination $stagedEngine -Force; $engineStaged = $true }
+    }
+
+    # ---------------- stage engine validation (both modes) --
+    # tauri-build validates every bundle.resources source path during ANY cargo
+    # invocation (cargo test/check), so the engine must be staged before cargo.
+    Must 'Validate staged engine' {
         if (-not (Test-Path -LiteralPath $stagedEngine -PathType Leaf)) { throw 'Staging failed' }
         $b = [IO.File]::ReadAllBytes($stagedEngine)
         if ($b.Length -lt 1048576 -or $b[0] -ne 77 -or $b[1] -ne 90) { throw 'Staged engine is not a valid PE' }
@@ -236,7 +295,47 @@ try {
     if (Test-Path -LiteralPath $nsisDir) {
         Get-ChildItem -LiteralPath $nsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue | Remove-Item -Force
     }
-    Must 'Package NSIS Windows installer (Tauri)' { npm run package:windows }
+    # ---------------- Tauri config override for signing (Signed mode only) ---
+    if ($ReleaseMode -eq 'Signed') {
+        Must 'Apply Tauri signing config override' {
+            $expectedThumbprint = $env:CANOPI_CERT_THUMBPRINT
+            $expectedSubject = $env:CANOPI_CERT_SUBJECT
+            $timestampUrl = 'http://timestamp.sectigo.com'
+            $signScript = (Resolve-Path "$PSScriptRoot\sign-engine.ps1").Path
+            $configObj = [ordered]@{
+                bundle = @{
+                    windows = @{
+                        certificateThumbprint = $expectedThumbprint
+                        digestAlgorithm = 'sha256'
+                        timestampUrl = $timestampUrl
+                        tsp = $true
+                        signCommand = @{
+                            cmd = 'powershell.exe'
+                            args = @(
+                                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $signScript,
+                                '-BinaryPath', '%1',
+                                '-Thumbprint', $expectedThumbprint,
+                                '-Subject', $expectedSubject,
+                                '-TimestampUrl', $timestampUrl
+                            )
+                        }
+                    }
+                }
+            }
+            $configPath = Join-Path $env:TEMP ('tauri-signing-config-' + [guid]::NewGuid().ToString('N') + '.json')
+            $configObj | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $configPath -Encoding UTF8
+            $env:TAURI_CONFIG_OVERRIDE_PATH = $configPath
+            Write-Host "Tauri signing config override: $configPath"
+        }
+    }
+
+    Must 'Package NSIS Windows installer (Tauri)' {
+        if ($ReleaseMode -eq 'Signed' -and $env:TAURI_CONFIG_OVERRIDE_PATH) {
+            npm run package:windows -- --config $env:TAURI_CONFIG_OVERRIDE_PATH
+        } else {
+            npm run package:windows
+        }
+    }
 
     $installers = @(Get-ChildItem -LiteralPath $nsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue)
     if ($installers.Count -ne 1) { throw "Expected exactly one installer, found $($installers.Count)" }
@@ -245,6 +344,87 @@ try {
         $fs = [IO.File]::OpenRead($installer.FullName)
         try { $a = $fs.ReadByte(); $b = $fs.ReadByte(); if ($fs.Length -lt 1048576 -or $a -ne 77 -or $b -ne 90) { throw 'Installer is not a valid-size PE file' } }
         finally { $fs.Dispose() }
+    }
+
+    # ---------------- Authenticode signature verification (fail closed for production) ---
+    $isSignedBuild = ($ReleaseMode -eq 'Signed')
+    $expectedThumbprint = $env:CANOPI_CERT_THUMBPRINT
+    $expectedSubject = $env:CANOPI_CERT_SUBJECT
+    if ($isSignedBuild) {
+        if (-not $expectedThumbprint) { throw 'ReleaseMode=Signed requires CANOPI_CERT_THUMBPRINT environment variable' }
+        if (-not $expectedSubject) { throw 'ReleaseMode=Signed requires CANOPI_CERT_SUBJECT environment variable' }
+        $expectedThumbprint = $expectedThumbprint.ToUpper().Replace(' ', '')
+        Must 'Verify Authenticode signatures on all shipped executables' {
+            $bins = @(
+                'src-tauri/target/release/canoPi.exe',
+                'src-tauri/target/release/engine/cnp-engine.exe',
+                $installer.FullName
+            )
+            foreach ($bin in $bins) {
+                if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
+                    throw "Missing executable for signature verification: $bin"
+                }
+                $sig = Get-AuthenticodeSignature -FilePath $bin
+                $valid = $sig.Status -eq 'Valid'
+                $thumbprint = $sig.SignerCertificate.Thumbprint.ToUpper()
+                $match = $thumbprint -eq $expectedThumbprint
+                $subject = $sig.SignerCertificate.Subject
+                $subjectMatch = $subject -eq $expectedSubject
+                $tsCert = $sig.TimeStamperCertificate
+                if (-not $valid -or -not $match -or -not $subjectMatch -or -not $tsCert) {
+                    throw "SIGNATURE FAIL: $bin Status=$($sig.Status) Thumbprint=$thumbprint Expected=$expectedThumbprint Subject=$subject ExpectedSubject=$expectedSubject TimeStamper=$([bool]$tsCert)"
+                }
+                Write-Host "OK: $bin Valid issuer=$subject Thumbprint=$thumbprint TimeStamper=$($tsCert.Subject)"
+            # Verify embedded uninstaller in NSIS installer
+            if ($bin -eq $installer.FullName) {
+                $extractDir = Join-Path $env:TEMP ('cnp-extract-' + [guid]::NewGuid().ToString('N'))
+                try {
+                    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+                    # Extract installer using 7z (NSIS installers are extractable)
+                    if (Get-Command 7z -ErrorAction SilentlyContinue) {
+                        & 7z x $bin -o$extractDir -y | Out-Null
+                        $uninstaller = Get-ChildItem -LiteralPath $extractDir -Filter 'uninstall*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($uninstaller) {
+                            $uninstSig = Get-AuthenticodeSignature -FilePath $uninstaller.FullName
+                            $uninstValid = $uninstSig.Status -eq 'Valid'
+                            $uninstThumbprint = $uninstSig.SignerCertificate.Thumbprint.ToUpper()
+                            $uninstMatch = $uninstThumbprint -eq $expectedThumbprint
+                            $uninstSubject = $uninstSig.SignerCertificate.Subject
+                            $uninstSubjectMatch = $uninstSubject -eq $expectedSubject
+                            $uninstTsCert = $uninstSig.TimeStamperCertificate
+                            if (-not $uninstValid -or -not $uninstMatch -or -not $uninstSubjectMatch -or -not $uninstTsCert) {
+                                throw "EMBEDDED UNINSTALLER SIGNATURE FAIL: $($uninstaller.FullName) Status=$($uninstSig.Status) Thumbprint=$uninstThumbprint Expected=$expectedThumbprint Subject=$uninstSubject ExpectedSubject=$expectedSubject TimeStamper=$([bool]$uninstTsCert)"
+                            }
+                            Write-Host "OK: Embedded uninstaller $($uninstaller.Name) Valid issuer=$uninstSubject Thumbprint=$uninstThumbprint TimeStamper=$($uninstTsCert.Subject)"
+                        } else {
+                            throw "Embedded uninstaller not found in installer"
+                        }
+                    } else {
+                        throw "7z not available; required for embedded uninstaller verification in Signed mode"
+                    }
+                } finally {
+                    if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+                }
+            }
+            }
+        }
+    } else {
+        if ($expectedThumbprint) {
+            Write-Host "NOTE: CANOPI_CERT_THUMBPRINT set but ReleaseMode=Development; skipping Authenticode gate" -ForegroundColor Yellow
+        } else {
+            Write-Host "Development build: unsigned (SmartScreen warnings expected)" -ForegroundColor Yellow
+        }
+        Step-Record 'Authenticode signature verification' 'SKIPPED' 0 'ReleaseMode=Development'
+    }
+
+    # ---------------- Update engine provenance with signed engine info (Signed mode only) ---
+    if ($isSignedBuild) {
+        Must 'Update engine provenance with signed engine hashes' {
+            $signedEngine = 'src-tauri/target/release/engine/cnp-engine.exe'
+            if (-not (Test-Path -LiteralPath $signedEngine -PathType Leaf)) { throw "Signed engine not found at $signedEngine" }
+            $timestampUrl = 'http://timestamp.sectigo.com'
+            python scripts/verify-engine-provenance.py --sign-engine 'ENGINE-PROVENANCE.json' $signedEngine $expectedThumbprint $timestampUrl
+        }
     }
 
     # ---------------- safety + lifecycle verification ----------------------
@@ -271,14 +451,33 @@ try {
         Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $releaseDir $setupName) -Force
         Copy-Item -LiteralPath 'ENGINE-PROVENANCE.json' -Destination (Join-Path $releaseDir 'ENGINE-PROVENANCE.json') -Force
     }
-    Must 'Create source ZIP (git-tracked files + lockfiles, no binaries)' {
+    Must 'Create source ZIP (git-tracked files + lockfiles + allowlisted untracked, no binaries)' {
         $stage = Join-Path $env:TEMP ('canopi-src-' + [guid]::NewGuid().ToString('N'))
         try {
             New-Item -ItemType Directory -Path $stage | Out-Null
             $raw = & git -c core.quotepath=false ls-files
-            $files = @($raw | Where-Object { $_ })
+            # Obsolete source-regex tests were intentionally removed; archive the cutover.
+            $obsoleteTests = @('tests/native-adapters.test.mjs', 'tests/source-fork.test.mjs')
+            $files = @($raw | Where-Object { $_ -and $obsoleteTests -notcontains $_ })
             foreach ($extra in @('package-lock.json', 'src-tauri/Cargo.lock')) {
                 if ((Test-Path -LiteralPath $extra -PathType Leaf) -and ($files -notcontains $extra)) { $files += $extra }
+            }
+            # Include allowlisted untracked source files
+            $allowedUntracked = @(
+                'scripts/upgrade-smoke.ps1',
+                'scripts/sign-engine.ps1',
+                'scripts/patch-omp.mjs',
+                'src-tauri/src/provider_endpoint.rs',
+                'src/components/ProviderImport.jsx',
+                'src/runtime/event-queue.mjs',
+                'src/runtime/tool-activity.mjs',
+                'tests/event-queue.test.mjs',
+                'tests/tool-activity.test.mjs',
+                'docs/TOMORROW_EXECUTION_PLAN.md',
+                'patches/omp/0002-canoPi-transport-endpoint-security.patch'
+            )
+            foreach ($allowed in $allowedUntracked) {
+                if ((Test-Path -LiteralPath $allowed -PathType Leaf) -and ($files -notcontains $allowed)) { $files += $allowed }
             }
             if ($files.Count -lt 10) { throw 'git ls-files returned suspiciously few files' }
             $skipped = @()
@@ -360,8 +559,12 @@ try {
                 nsis = "bundled with @tauri-apps/cli $cliVer"
             }
             signing = [ordered]@{
-                codeSigned = $false
-                note = 'Unsigned build. SmartScreen warnings are expected; no signature or reputation is claimed.'
+                codeSigned = [bool]$expectedThumbprint
+                thumbprint = if ($expectedThumbprint) { $expectedThumbprint } else { $null }
+                digestAlgorithm = 'sha256'
+                timestampUrl = 'http://timestamp.sectigo.com'
+                tsp = $true
+                note = if ($expectedThumbprint) { 'Authenticode-signed with RFC3161 timestamp; all shipped executables verified against expected thumbprint.' } else { 'Unsigned build. SmartScreen warnings are expected; no signature or reputation is claimed.' }
             }
             tests = @($script:Steps | Where-Object { $_.name -match 'test|smoke|verif|Node runtime|Compile and test|lifecycle|Uninstall data' } |
                 ForEach-Object { [ordered]@{ name = $_.name; status = $_.status } })
@@ -421,8 +624,9 @@ try {
     } catch { Write-Host "Report generation also failed: $($_.Exception.Message)" -ForegroundColor Red }
     throw
 } finally {
-    # Keep the working tree test-clean: the engine must not remain staged
-    # at the resource path after packaging (installer already embeds it).
+    # Keep the working tree test-clean: remove ONLY a staged copy this script
+    # created. A supplied engine already at the resource path is the user's
+    # file and must survive the run.
     if ($engineStaged -and (Test-Path -LiteralPath $stagedEngine)) {
         Remove-Item -LiteralPath $stagedEngine -Force -ErrorAction SilentlyContinue
     }

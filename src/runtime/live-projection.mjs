@@ -4,11 +4,11 @@ import { textFromMessage } from './projection.mjs';
  * Never mix a worker's or another session's frames into this transcript.
  * `message_end` has the canonical full message, repairing missed deltas.
  */
-export function projectAssistantFrame(messages, frame) {
+export function projectAssistantFrame(messages, frame, generation = 0) {
   if (!['message_start', 'message_update', 'message_end'].includes(frame?.type)) return messages;
   if (typeof frame.messageId !== 'string' || !frame.messageId.trim()) return messages;
   if (frame.message?.role !== 'assistant') return messages;
-  const id = 'omp-' + frame.messageId;
+  const id = 'omp-' + generation + '-' + frame.messageId;
   const idx = messages.findIndex(m => m.id === id);
   const current = idx >= 0 ? messages[idx] : { id, role:'asst', text:'', native:true };
   let text = current.text;
@@ -23,7 +23,7 @@ export function projectAssistantFrame(messages, frame) {
   }
   if (frame.type === 'message_end') text = textFromMessage(frame.message);
   if (idx >= 0 && current.text === text) return messages;
-  const updated = { ...current, text };
+  const updated = { ...current, text, timestamp:frame.message?.timestamp ?? current.timestamp, generation };
   if (idx < 0) return [...messages, updated];
   const copy = [...messages]; copy[idx] = updated; return copy;
 }

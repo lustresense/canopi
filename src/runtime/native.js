@@ -1,45 +1,11 @@
-/** Actual native Windows ConPTY (via portable-pty) and per-agent WebView2 windows.
- * Nothing in this module produces fake terminal/browser data.
+/** Native capability bridge: agent-owned WebView2 windows and profile management.
  * Native browser windows are interactive for the user, not a claim of OMP
  * `tab.run`/computer-tool parity.
  */
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { inDesktop } from './omp.js';
 
 const requireDesktop = () => { if (!inDesktop()) throw new Error('Only available in canoPi Desktop'); };
-export async function createTerminal(sessionKey, terminalId, projectPath) {
-  requireDesktop();
-  return invoke('pty_open',{sessionKey,terminalId,projectPath});
-}
-export async function writeTerminal(sessionKey, terminalId, data) {
-  requireDesktop(); return invoke('pty_write',{sessionKey,terminalId,data});
-}
-export async function resizeTerminal(sessionKey, terminalId, rows, cols) {
-  requireDesktop(); return invoke('pty_resize',{sessionKey,terminalId,rows,cols});
-}
-export async function closeTerminal(sessionKey, terminalId) {
-  requireDesktop(); return invoke('pty_close',{sessionKey,terminalId});
-}
-
-/* Extended terminal surface (registered by Main in invoke_handler). */
-export async function listTerminals(sessionKey) {
-  requireDesktop(); return invoke('pty_list',{sessionKey});
-}
-export async function signalTerminal(sessionKey, terminalId, kind) {
-  requireDesktop(); return invoke('pty_signal',{sessionKey,terminalId,kind});
-}
-export async function closeSessionTerminals(sessionKey) {
-  requireDesktop(); return invoke('pty_close_session',{sessionKey});
-}
-export async function watchTerminal(onChunk, onExit) {
-  requireDesktop();
-  const un1=await listen('cnp-pty-data',({payload})=>onChunk(payload));
-  try {
-    const un2=await listen('cnp-pty-exit',({payload})=>onExit(payload));
-    return ()=>{un1();un2();};
-  }catch(e){un1();throw e;}
-}
 export async function openAgentBrowser(sessionKey,agentId,url) {
   requireDesktop();return invoke('browser_open',{sessionKey,agentId,url});
 }
@@ -74,8 +40,22 @@ export async function clearAgentBrowserData(sessionKey, agentId) {
 export async function previewOmpModels() {
   requireDesktop();return invoke('provider_import_preview');
 }
-export async function importOmpModels(filename) {
-  requireDesktop();return invoke('provider_import_models',{filename});
+export async function importOmpModels(filename, selectedProviderIds) {
+  requireDesktop();return invoke('provider_import_models',{filename, selectedProviderIds});
+}
+
+/** Provider endpoint trust management and import preview. */
+export async function validateProviderBaseUrl(url) {
+  requireDesktop(); return invoke('provider_validate_base_url', { url });
+}
+export async function trustProviderEndpoint(scheme, host, port, note) {
+  requireDesktop(); return invoke('provider_trust_endpoint', { scheme, host, port, note });
+}
+export async function revokeProviderEndpointTrust(scheme, host, port) {
+  requireDesktop(); return invoke('provider_revoke_endpoint_trust', { scheme, host, port });
+}
+export async function listTrustedProviderEndpoints() {
+  requireDesktop(); return invoke('provider_list_trusted_endpoints');
 }
 
 /** Provider API key persistence and configuration status in isolated canoPi profile. */

@@ -71,10 +71,15 @@ if ($null -ne $manifest) {
     $lines += "- Product: canoPi $($manifest.version) (identifier $($manifest.identifier), publisher canoPi Project)"
     $lines += "- Engine: ``$($manifest.engine.name)`` $($manifest.engine.bytes) bytes, SHA256 ``$($manifest.engine.sha256)`` (source: $($manifest.engineSource))"
     $lines += "- Upstream commit: ``$($manifest.upstreamCommit)``; source patch SHA256 ``$($manifest.sourcePatchSha256)``"
+    if ($manifest.signing -and $manifest.signing.codeSigned) {
+        $lines += "- Code signing: **Authenticode-signed** (thumbprint: $($manifest.signing.thumbprint), digest: $($manifest.signing.digestAlgorithm), RFC3161 timestamp: $($manifest.signing.timestampUrl))"
+    } else {
+        $lines += '- Code signing: **unsigned** build (BUILD-MANIFEST reports codeSigned=false); SmartScreen warnings expected, no signature or reputation claimed.'
+    }
 } else {
     $lines += '- BUILD-MANIFEST.json: NOT PRODUCED (build did not reach publication)'
+    $lines += '- Code signing: unknown (no BUILD-MANIFEST.json); no signature or reputation is claimed.'
 }
-$lines += '- Code signing: **unsigned**; SmartScreen warnings expected, no signature or reputation claimed.'
 $lines += ''
 $lines += 'Every status below comes from a log or evidence file on disk. Anything without'
 $lines += 'evidence is marked NOT RUN - this report never upgrades a result by itself.'
@@ -207,7 +212,11 @@ if ($shots.Count -eq 0) {
 $lines += ''
 $lines += '## 7. Honest scope notes'
 $lines += ''
-$lines += '- This build is **unsigned**; no SmartScreen-clean claim is made.'
+if ($manifest -and $manifest.signing -and $manifest.signing.codeSigned) {
+    $lines += '- Authenticode signatures were verified against the expected thumbprint/subject with RFC3161 timestamps (Signed mode); SmartScreen-clean is still NOT claimed.'
+} else {
+    $lines += '- This build is **unsigned** (or signing state is unknown); no SmartScreen-clean claim is made.'
+}
 $lines += '- Data deletion is not secure erase (SSD wear levelling, snapshots, cloud sync).'
 $lines += '- Static/disposable-profile tests are labeled as such and are not install E2E.'
 $lines += '- Rows marked NOT RUN must be executed (usually in a clean Windows VM) and their'

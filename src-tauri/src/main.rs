@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod provider_endpoint;
 mod rpc_framing;
 mod native;
 
 use fs2::FileExt;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -44,6 +46,8 @@ struct Session {
     // Held for this session's lifetime. A second canoPi instance cannot write
     // to the same OMP session file concurrently, even after a process crash.
     _session_lock: File,
+    /// Canonicalized session directory path for path containment checks.
+    session_dir: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -542,6 +546,7 @@ async fn rpc_start(app: tauri::AppHandle, state: tauri::State<'_, Supervisor>, s
     let engine = engine_path(&app)?;
     let profile_dir = engine_profile_dir(&app)?;
     let session_dir = app_data_root(&app)?.join("sessions").join(&session_key);
+    init_trusted_registry(&profile_dir)?;
     let lock = lock_session(&session_dir)?;
     // PI_CONFIG_DIR uses a *relative directory name under the user's home*.
     // The fork must eventually relocate the entire root into canoPi AppPaths.
@@ -559,9 +564,13 @@ async fn rpc_start(app: tauri::AppHandle, state: tauri::State<'_, Supervisor>, s
             .env("PI_CONFIG_FILES", "").env("PI_CODING_AGENT_SESSION_DIR", "")
             .env("PI_CODING_AGENT_DIR", &profile_dir)
             .env("PI_CONFIG_DIR", ".canopi")
+            .env("CANOPI_STRICT_ENDPOINTS", "1")
+            .env("CANOPI_TRUSTED_ENDPOINTS_PATH", profile_dir.join("trusted_endpoints.json"))
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        cmd.spawn()
             .map_err(|e| format!("Could not spawn cnp engine: {e}"))?
     };
     let input = child.stdin.take().ok_or("Engine stdin unavailable")?;
@@ -579,6 +588,7 @@ async fn rpc_start(app: tauri::AppHandle, state: tauri::State<'_, Supervisor>, s
         ui_requests: Mutex::new(HashSet::new()),
         late: Mutex::new(HashSet::new()),
         _session_lock: lock,
+        session_dir: session_dir.clone(),
     });
     {
         let mut sessions = state.sessions.lock().await;
@@ -657,6 +667,17 @@ async fn rpc_send(state: tauri::State<'_, Supervisor>, session_key: String, comm
     let session = state.sessions.lock().await.get(&session_key).cloned().ok_or("Session engine not running")?;
     if expected_generation.is_none() { return Err("Session generation required".into()); }
     if expected_generation.is_some_and(|g| g != session.generation) { return Err("Session generation changed; reload state".into()); }
+    
+    // Intercept get_subagent_messages to enforce session file containment
+    if ty == "get_subagent_messages" {
+        if let Some(session_file) = command.get("sessionFile").and_then(Value::as_str) {
+            let canonical = provider_endpoint::canonicalize_session_file(&session.session_dir, session_file)?;
+            let mut cmd = command;
+            cmd["sessionFile"] = Value::String(canonical.to_string_lossy().to_string());
+            return request(&session, &state, cmd).await;
+        }
+    }
+    
     request(&session, &state, command).await
 }
 
@@ -687,12 +708,8 @@ async fn stop_engine(session: Arc<Session>) -> Result<(), String> {
     }
 }
 
-// Session teardown closes the host-side PTY and browser surfaces owned by a
-// session. Both close helpers are idempotent, so rpc_stop and the reader EOF
-// path may run them in either order.
-fn teardown_session_resources(app: &tauri::AppHandle, session_key: &str) {
-    let terms = app.state::<native::TerminalManager>();
-    native::close_session_terminals(&terms, session_key);
+// Session teardown closes browser surfaces owned by a session.
+fn teardown_session_resources(_app: &tauri::AppHandle, session_key: &str) {
     native::close_session_browsers(session_key);
 }
 
@@ -701,7 +718,7 @@ async fn rpc_stop(app: tauri::AppHandle, state: tauri::State<'_, Supervisor>, se
     if let Some(session) = state.sessions.lock().await.remove(&session_key) {
         stop_engine(session).await?;
     }
-    // Session teardown: PTYs and browser surfaces belong to the session, not
+    // Session teardown: browser surfaces belong to the session, not
     // to this engine process; close them even if the engine was already gone.
     teardown_session_resources(&app, &session_key);
     Ok(())
@@ -711,8 +728,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Supervisor::default())
-        .manage(native::TerminalManager::default())
-        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, native::pty_open, native::pty_write, native::pty_resize, native::pty_close, native::pty_signal, native::pty_list, native::pty_close_session, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models, provider_save_key, provider_status, data_root_status, recover_data_root])
+        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models, provider_save_key, provider_status, provider_trust_endpoint, provider_revoke_endpoint_trust, provider_list_trusted_endpoints, provider_validate_base_url, data_root_status, recover_data_root])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Only the main window owns full application shutdown. Auxiliary
@@ -727,8 +743,6 @@ fn main() {
                         registry.drain().map(|(_, session)| session).collect()
                     };
                     for session in sessions { let _ = stop_engine(session).await; }
-                    let terms = app.state::<native::TerminalManager>();
-                    native::close_all_terminals(&terms);
                     native::close_all_browsers();
                     app.exit(0);
                 });
@@ -924,24 +938,352 @@ mod tests {
         let _ = std::process::Command::new("cmd").args(["/C", "rmdir", &link.to_string_lossy()]).output();
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn validate_http_url_accepts_http_and_https_only() {
+        assert!(validate_http_url("https://api.openai.com/v1").is_ok());
+        assert!(validate_http_url("http://127.0.0.1:9090/v1").is_ok());
+        assert!(validate_http_url("ftp://example.com").is_err());
+        assert!(validate_http_url("not-a-url").is_err());
+        assert!(validate_http_url("http://").is_err());
+        assert!(validate_http_url("").is_err());
+    }
+
+    #[test]
+    fn update_yaml_providers_creates_and_preserves() {
+        let initial = "";
+        let mut ant_updates = serde_yaml::Mapping::new();
+        ant_updates.insert(
+            serde_yaml::Value::String("apiKey".to_string()),
+            serde_yaml::Value::String("sk-ant-test".to_string()),
+        );
+        let res1 = update_yaml_providers(initial, "anthropic", &ant_updates).expect("updates empty yaml");
+        let parsed1 = parse_yaml_providers(&res1).expect("parses valid yaml");
+        assert_eq!(parsed1.len(), 1);
+        assert_eq!(parsed1[0]["id"], "anthropic");
+        assert_eq!(parsed1[0]["hasKey"], true);
+
+        let mut cust_updates = serde_yaml::Mapping::new();
+        cust_updates.insert(
+            serde_yaml::Value::String("baseUrl".to_string()),
+            serde_yaml::Value::String("http://127.0.0.1:8000/v1".to_string()),
+        );
+        cust_updates.insert(
+            serde_yaml::Value::String("apiKey".to_string()),
+            serde_yaml::Value::String("custom-key".to_string()),
+        );
+        cust_updates.insert(
+            serde_yaml::Value::String("api".to_string()),
+            serde_yaml::Value::String("openai-completions".to_string()),
+        );
+        let res2 = update_yaml_providers(&res1, "custom", &cust_updates).expect("updates second provider");
+        let parsed2 = parse_yaml_providers(&res2).expect("parses combined yaml");
+        assert_eq!(parsed2.len(), 2);
+        let ant = parsed2.iter().find(|p| p["id"] == "anthropic").unwrap();
+        assert_eq!(ant["hasKey"], true);
+        let cust = parsed2.iter().find(|p| p["id"] == "custom").unwrap();
+        assert_eq!(cust["hasKey"], true);
+        assert_eq!(cust["baseUrl"], "http://127.0.0.1:8000/v1");
+        assert_eq!(cust["api"], "openai-completions");
+    }
+
+    #[test]
+    fn update_yaml_providers_updates_in_place_and_preserves_unrelated() {
+        let existing = r#"
+defaultModel: anthropic/claude-3-5-sonnet
+version: 2
+providers:
+  anthropic:
+    apiKey: "old-key"
+    organization: "org-123"
+    timeout: 5000
+  groq:
+    apiKey: "groq-key"
+"#;
+        let mut updated = serde_yaml::Mapping::new();
+        updated.insert(
+            serde_yaml::Value::String("apiKey".to_string()),
+            serde_yaml::Value::String("new-key".to_string()),
+        );
+        let res = update_yaml_providers(existing, "anthropic", &updated).expect("update in place");
+        let parsed_yaml: serde_yaml::Value = serde_yaml::from_str(&res).expect("valid yaml");
+        assert_eq!(parsed_yaml["defaultModel"].as_str(), Some("anthropic/claude-3-5-sonnet"));
+        assert_eq!(parsed_yaml["version"].as_i64(), Some(2));
+        assert_eq!(parsed_yaml["providers"]["anthropic"]["apiKey"].as_str(), Some("new-key"));
+        assert_eq!(parsed_yaml["providers"]["anthropic"]["organization"].as_str(), Some("org-123"));
+        assert_eq!(parsed_yaml["providers"]["anthropic"]["timeout"].as_i64(), Some(5000));
+        assert_eq!(parsed_yaml["providers"]["groq"]["apiKey"].as_str(), Some("groq-key"));
+    }
+
+    #[test]
+    fn update_yaml_providers_fails_on_malformed_yaml() {
+        let malformed = "providers:\n  anthropic:\n    [unclosed";
+        let mut updates = serde_yaml::Mapping::new();
+        updates.insert(
+            serde_yaml::Value::String("apiKey".to_string()),
+            serde_yaml::Value::String("key".to_string()),
+        );
+        assert!(update_yaml_providers(malformed, "anthropic", &updates).is_err());
+    }
+
+    #[test]
+    fn update_yaml_providers_fails_on_invalid_structure() {
+        let non_mapping_root = "- item1\n- item2\n";
+        let mut updates = serde_yaml::Mapping::new();
+        updates.insert(
+            serde_yaml::Value::String("apiKey".to_string()),
+            serde_yaml::Value::String("key".to_string()),
+        );
+        assert!(update_yaml_providers(non_mapping_root, "anthropic", &updates).is_err());
+
+        let non_mapping_providers = "providers: 12345\n";
+        assert!(update_yaml_providers(non_mapping_providers, "anthropic", &updates).is_err());
+    }
+
+    #[test]
+    fn parse_yaml_providers_extracts_metadata() {
+        let yaml = "providers:\n  anthropic:\n    apiKey: \"sk-ant-123\"\n  custom:\n    baseUrl: \"https://proxy.example.com/v1\"\n    apiKey: \"tok-456\"\n    api: openai-completions\n  empty:\n    apiKey: \"\"\n";
+        let providers = parse_yaml_providers(yaml).expect("valid yaml");
+        assert_eq!(providers.len(), 3);
+        let ant = providers.iter().find(|p| p["id"] == "anthropic").unwrap();
+        assert_eq!(ant["hasKey"], true);
+        assert_eq!(ant["baseUrl"], Value::Null);
+        assert_eq!(ant["api"], Value::Null);
+        let cust = providers.iter().find(|p| p["id"] == "custom").unwrap();
+        assert_eq!(cust["hasKey"], true);
+        assert_eq!(cust["baseUrl"], "https://proxy.example.com/v1");
+        assert_eq!(cust["api"], "openai-completions");
+        let empty = providers.iter().find(|p| p["id"] == "empty").unwrap();
+        assert_eq!(empty["hasKey"], false);
+    }
+
+    #[test]
+    fn parse_yaml_providers_fails_on_malformed_yaml_or_invalid_structure() {
+        assert!(parse_yaml_providers("providers:\n  anthropic:\n    [unclosed").is_err());
+        assert!(parse_yaml_providers("- item1\n- item2").is_err());
+        assert!(parse_yaml_providers("providers: \"not-a-map\"").is_err());
+        assert_eq!(parse_yaml_providers("").unwrap(), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn get_canonical_models_file_preserves_suffix() {
+        let temp_dir = std::env::temp_dir().join(format!("canopi-canonical-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let (f1, exists1) = get_canonical_models_file(&temp_dir);
+        assert_eq!(f1.file_name().unwrap(), "models.yml");
+        assert!(!exists1);
+
+        let yaml_file = temp_dir.join("models.yaml");
+        std::fs::write(&yaml_file, "providers: {}\n").unwrap();
+        let (f2, exists2) = get_canonical_models_file(&temp_dir);
+        assert_eq!(f2.file_name().unwrap(), "models.yaml");
+        assert!(exists2);
+
+        let yml_file = temp_dir.join("models.yml");
+        std::fs::write(&yml_file, "providers: {}\n").unwrap();
+        let (f3, exists3) = get_canonical_models_file(&temp_dir);
+        assert_eq!(f3.file_name().unwrap(), "models.yml");
+        assert!(exists3);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_builtin_provider_with_base_url_and_model_id_emits_canonical_yaml() {
+        let updates = build_provider_updates(
+            "openai",
+            "sk-mock-key",
+            Some("http://127.0.0.1:11434/v1"),
+            None,
+            Some("qwen2.5:7b"),
+        ).expect("build updates should succeed");
+
+        let yaml = update_yaml_providers("", "openai", &updates).expect("yaml serialization should succeed");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("emitted yaml must parse");
+        let prov_map = parsed
+            .get("providers")
+            .and_then(|p| p.get("openai"))
+            .expect("openai provider must exist");
+
+        assert_eq!(
+            prov_map.get("apiKey").and_then(|v| v.as_str()),
+            Some("sk-mock-key")
+        );
+        assert_eq!(
+            prov_map.get("baseUrl").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:11434/v1")
+        );
+
+        let models = prov_map.get("models").and_then(|m| m.as_sequence()).expect("models sequence");
+        assert_eq!(models.len(), 1);
+        let m = &models[0];
+        assert_eq!(m.get("id").and_then(|v| v.as_str()), Some("qwen2.5:7b"));
+        assert_eq!(m.get("name").and_then(|v| v.as_str()), Some("qwen2.5:7b"));
+        assert_eq!(m.get("api").and_then(|v| v.as_str()), Some("openai-completions"));
+        assert_eq!(m.get("contextWindow").and_then(|v| v.as_i64()), Some(128_000));
+        assert_eq!(m.get("maxTokens").and_then(|v| v.as_i64()), Some(16_384));
+        assert!(m.get("cost").and_then(|v| v.as_mapping()).is_some());
+        assert_eq!(m.get("input").and_then(|v| v.as_sequence()).map(|s| s.len()), Some(1));
+    }
+
+    #[test]
+    fn test_custom_provider_with_proxy_emits_canonical_yaml() {
+        let updates = build_provider_updates(
+            "9router",
+            "sk-local-proxy",
+            Some("http://127.0.0.1:9090/v1"),
+            Some("openai-completions"),
+            Some("custom-model"),
+        ).expect("build updates should succeed");
+
+        let yaml = update_yaml_providers("", "9router", &updates).expect("yaml serialization should succeed");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("emitted yaml must parse");
+        let prov_map = parsed
+            .get("providers")
+            .and_then(|p| p.get("9router"))
+            .expect("9router provider must exist");
+
+        assert_eq!(
+            prov_map.get("api").and_then(|v| v.as_str()),
+            Some("openai-completions")
+        );
+        let models = prov_map.get("models").and_then(|m| m.as_sequence()).expect("models sequence");
+        assert_eq!(models.len(), 1);
+        let m = &models[0];
+        assert_eq!(m.get("id").and_then(|v| v.as_str()), Some("custom-model"));
+        assert_eq!(m.get("api").and_then(|v| v.as_str()), Some("openai-completions"));
+    }
+
+    #[test]
+    fn test_import_yaml_migrates_legacy_openai_chat() {
+        let legacy = format!(
+            "defaultModel: anthropic/claude-3-5-sonnet\nversion: 1\nproviders:\n  custom:\n    baseUrl: \"https://proxy.example.com/v1\"\n    apiKey: \"tok-123\"\n    {}: {}\n    models:\n      - id: m1\n        {}: {}\n",
+            "api", "openai-chat", "api", "openai-chat"
+        );
+        let sanitized = sanitize_and_normalize_models(&legacy, "models.yml")
+            .expect("sanitization must succeed");
+        assert!(!sanitized.contains("openai-chat"));
+        assert!(sanitized.contains("openai-completions"));
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&sanitized).expect("valid yaml");
+        assert_eq!(
+            parsed["providers"]["custom"]["api"].as_str(),
+            Some("openai-completions")
+        );
+        assert_eq!(
+            parsed["providers"]["custom"]["models"][0]["api"].as_str(),
+            Some("openai-completions")
+        );
+        assert_eq!(parsed["defaultModel"].as_str(), Some("anthropic/claude-3-5-sonnet"));
+        assert_eq!(parsed["version"].as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_import_yaml_rejects_unsupported_api() {
+        let bad = "providers:\n  custom:\n    baseUrl: \"https://proxy.example.com/v1\"\n    apiKey: \"tok-123\"\n    api: unsupported-api-protocol\n";
+        assert!(sanitize_and_normalize_models(bad, "models.yml").is_err());
+    }
+
+    #[test]
+    fn test_import_yaml_fails_closed_on_malformed_syntax() {
+        let malformed = "providers:\n  custom:\n    [unclosed";
+        assert!(sanitize_and_normalize_models(malformed, "models.yml").is_err());
+    }
+
+    #[test]
+    fn test_import_yaml_fails_closed_on_invalid_structure() {
+        let bad_root = "- item1\n- item2\n";
+        assert!(sanitize_and_normalize_models(bad_root, "models.yml").is_err());
+
+        let bad_providers = "providers: \"not-a-map\"\n";
+        assert!(sanitize_and_normalize_models(bad_providers, "models.yml").is_err());
+    }
+
+    #[test]
+    fn test_import_json_migrates_legacy_openai_chat() {
+        let legacy = format!(
+            "{{\n  \"defaultModel\": \"custom/m1\",\n  \"providers\": {{\n    \"custom\": {{\n      \"baseUrl\": \"https://proxy.example.com/v1\",\n      \"apiKey\": \"tok-123\",\n      \"{}\": \"{}\",\n      \"models\": [\n        {{ \"id\": \"m1\", \"{}\": \"{}\" }}\n      ]\n    }}\n  }}\n}}",
+            "api", "openai-chat", "api", "openai-chat"
+        );
+        let sanitized = sanitize_and_normalize_models(&legacy, "models.json")
+            .expect("json sanitization must succeed");
+        assert!(!sanitized.contains("openai-chat"));
+        assert!(sanitized.contains("openai-completions"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&sanitized).expect("valid json");
+        assert_eq!(
+            parsed["providers"]["custom"]["api"].as_str(),
+            Some("openai-completions")
+        );
+        assert_eq!(
+            parsed["providers"]["custom"]["models"][0]["api"].as_str(),
+            Some("openai-completions")
+        );
+    }
+
+    #[test]
+    fn test_import_json_rejects_unsupported_api() {
+        let bad = "{\n  \"providers\": {\n    \"custom\": {\n      \"api\": \"unsupported-api-protocol\"\n    }\n  }\n}";
+        assert!(sanitize_and_normalize_models(bad, "models.json").is_err());
+    }
+
+    #[test]
+    fn test_parse_yaml_providers_normalizes_legacy_openai_chat() {
+        let yaml = format!(
+            "providers:\n  custom:\n    apiKey: \"tok-123\"\n    {}: {}\n",
+            "api", "openai-chat"
+        );
+        let providers = parse_yaml_providers(&yaml).expect("valid yaml");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["id"], "custom");
+        assert_eq!(providers[0]["api"], "openai-completions");
+    }
 }
 
 /// Narrow opt-in provider-definition import. Never copy OMP's auth SQLite DB,
 /// sessions or extensions. The source is read-only and remains user-owned.
+/// Narrow opt-in provider-definition import preview. Returns detailed per-provider
+/// preview with endpoint validation and trust requirements. Never imports secrets.
 #[tauri::command]
-fn provider_import_preview(app: tauri::AppHandle) -> Result<Value, String> {
+async fn provider_import_preview(app: tauri::AppHandle) -> Result<Value, String> {
     let source = app.path().home_dir().map_err(|e|e.to_string())?.join(".omp").join("agent");
     let names = ["models.yml", "models.yaml", "models.json"];
     let files = names.iter().filter(|name| {
         let p=source.join(name);
         std::fs::symlink_metadata(&p).map(|m|m.is_file() && !m.file_type().is_symlink() && m.len()<=1_048_576).unwrap_or(false)
     }).map(|x|x.to_string()).collect::<Vec<_>>();
-    Ok(json!({"available":!files.is_empty(),"files":files,
-        "scope":"Provider model definitions only. Credentials stored in agent.db are never imported."}))
+    
+    if files.is_empty() {
+        return Ok(json!({"available":false,"files":[],"providers":[]}));
+    }
+    
+    // Read and preview each available file
+    let mut all_previews = Vec::new();
+    for filename in &files {
+        let from = source.join(filename);
+        let data = std::fs::read(&from).map_err(|e|e.to_string())?;
+        let data_str = std::str::from_utf8(&data)
+            .map_err(|_| "Source provider file contains invalid UTF-8".to_string())?;
+        let previews = generate_import_preview(data_str, filename).await?;
+        all_previews.extend(previews);
+    }
+    
+    Ok(json!({
+        "available": true,
+        "files": files,
+        "providers": all_previews,
+        "scope": "Provider model definitions only. Credentials stored in agent.db are never imported. No API keys are returned in this preview."
+    }))
 }
 
 #[tauri::command]
-fn provider_import_models(app: tauri::AppHandle, filename: String) -> Result<Value,String> {
+fn provider_import_models(
+    app: tauri::AppHandle,
+    filename: String,
+    selected_provider_ids: Option<Vec<String>>,
+) -> Result<Value,String> {
     if !["models.yml","models.yaml","models.json"].contains(&filename.as_str()) {
         return Err("Only allowlisted OMP provider definitions can be imported".into());
     }
@@ -953,19 +1295,588 @@ fn provider_import_models(app: tauri::AppHandle, filename: String) -> Result<Val
     }
     let data=std::fs::read(&from).map_err(|e|e.to_string())?;
     if data.is_empty() {return Err("Source provider file is empty".into());}
+    let data_str = std::str::from_utf8(&data)
+        .map_err(|_| "Source provider file contains invalid UTF-8".to_string())?;
+    
+    // If specific providers selected, filter the config before sanitizing
+    let data_to_import = if let Some(selected) = selected_provider_ids {
+        if !selected.is_empty() {
+            // Parse and filter to only selected providers
+            let mut parsed: Value = if filename.ends_with(".json") {
+                serde_json::from_str(&data_str).map_err(|e| format!("Malformed JSON: {e}"))?
+            } else {
+                serde_yaml::from_str(&data_str).map_err(|e| format!("Malformed YAML: {e}"))?
+            };
+
+            if let Some(root) = parsed.as_object_mut() {
+                if let Some(Value::Object(providers)) = root.get_mut("providers") {
+                    providers.retain(|k, _| selected.contains(k));
+                }
+            }
+
+            if filename.ends_with(".json") {
+                serde_json::to_string(&parsed).map_err(|e| e.to_string())?
+            } else {
+                serde_yaml::to_string(&parsed).map_err(|e| e.to_string())?
+            }
+        } else {
+            data_str.to_string()
+        }
+    } else {
+        data_str.to_string()
+    };
+    
+    let sanitized = sanitize_and_validate_imported_models(&data_to_import, &filename)?;
     // Only the native provider file is copied. No symlinks, no overwrite, no
     // processing of secrets in the GUI, and never any access to ~/.omp/agent.db.
     let to=engine_profile_dir(&app)?.join(&filename);
     let mut file=OpenOptions::new().write(true).create_new(true).open(&to)
         .map_err(|_|"canoPi models file already exists; import is non-overwriting".to_string())?;
     use std::io::Write as _;
-    file.write_all(&data).map_err(|e|e.to_string())?;
+    file.write_all(sanitized.as_bytes()).map_err(|e|e.to_string())?;
     file.sync_all().map_err(|e|e.to_string())?;
     Ok(json!({"imported":filename,"scope":"models-only","restartRequired":true}))
 }
 
+const BUILTIN_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "google",
+    "openrouter",
+    "groq",
+    "mistral",
+    "xai",
+    "deepseek",
+    "together",
+];
+
+const ALLOWED_APIS: &[&str] = &[
+    "openai-completions",
+    "openai-responses",
+    "openai-codex-responses",
+    "azure-openai-responses",
+    "anthropic-messages",
+    "bedrock-converse-stream",
+    "google-generative-ai",
+    "google-gemini-cli",
+    "google-vertex",
+    "openrouter-decisions",
+    "typesafe",
+];
+
+use provider_endpoint::{
+    validate_provider_base_url, sanitize_and_validate_imported_models, generate_import_preview,
+    init_trusted_registry, trust_endpoint, revoke_endpoint_trust, list_trusted_endpoints,
+    canonicalize_session_file, EndpointTrustFingerprint, ProviderImportPreview,
+};
+
+fn default_api_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "anthropic-messages",
+        "google" => "google-generative-ai",
+        _ => "openai-completions",
+    }
+}
+
+fn validate_http_url(url: &str) -> Result<(), String> {
+    // Save-time validation: basic format check only.
+    // Full validation with DNS resolution happens at runtime in provider_endpoint.
+    let u = url.trim();
+    if u.is_empty() || u.len() > 2048 {
+        return Err("baseUrl exceeds maximum length (2048)".into());
+    }
+    let url_parsed = tauri::Url::parse(u).map_err(|_| "Invalid URL format".to_string())?;
+    let scheme = url_parsed.scheme().to_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err("baseUrl must use http:// or https:// scheme".into());
+    }
+    if !url_parsed.username().is_empty() || url_parsed.password().is_some() {
+        return Err("URL credentials (userinfo) are forbidden".into());
+    }
+    let host = url_parsed.host_str().ok_or("baseUrl must have a hostname")?;
+    if host.contains('@') {
+        return Err("Encoded host bypass detected".into());
+    }
+    Ok(())
+}
+fn sanitize_models_yaml(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Source provider file is empty".into());
+    }
+
+    let mut parsed: serde_yaml::Value = serde_yaml::from_str(trimmed)
+        .map_err(|e| format!("Malformed YAML: {e}"))?;
+
+    let root_map = match &mut parsed {
+        serde_yaml::Value::Mapping(m) => m,
+        _ => return Err("Invalid models config: root must be a mapping".into()),
+    };
+
+    let providers_key = serde_yaml::Value::String("providers".to_string());
+    if let Some(prov_val) = root_map.get_mut(&providers_key) {
+        match prov_val {
+            serde_yaml::Value::Mapping(providers_map) => {
+                for (k, v) in providers_map.iter_mut() {
+                    let prov_id = match k {
+                        serde_yaml::Value::String(s) => s.clone(),
+                        serde_yaml::Value::Number(n) => n.to_string(),
+                        _ => return Err("Provider identifier must be a string".into()),
+                    };
+
+                    let p_map = match v {
+                        serde_yaml::Value::Mapping(m) => m,
+                        _ => return Err(format!("Provider '{prov_id}' configuration must be a mapping")),
+                    };
+
+                    let base_url_key = serde_yaml::Value::String("baseUrl".to_string());
+                    if let Some(url_val) = p_map.get(&base_url_key) {
+                        if let Some(url_str) = url_val.as_str() {
+                            let u = url_str.trim();
+                            if !u.is_empty() {
+                                validate_http_url(u)?;
+                            }
+                        }
+                    }
+
+                    let api_key = serde_yaml::Value::String("api".to_string());
+                    if let Some(api_val) = p_map.get_mut(&api_key) {
+                        let api_str = match api_val.as_str() {
+                            Some(s) => s.trim(),
+                            None => return Err(format!("Provider '{prov_id}' 'api' must be a string")),
+                        };
+                        if api_str == "openai-chat" {
+                            *api_val = serde_yaml::Value::String("openai-completions".to_string());
+                        } else if !ALLOWED_APIS.contains(&api_str) {
+                            return Err(format!("Unsupported API '{api_str}' in provider '{prov_id}'"));
+                        }
+                    }
+
+                    let models_key = serde_yaml::Value::String("models".to_string());
+                    if let Some(models_val) = p_map.get_mut(&models_key) {
+                        match models_val {
+                            serde_yaml::Value::Sequence(models_seq) => {
+                                for (idx, m) in models_seq.iter_mut().enumerate() {
+                                    match m {
+                                        serde_yaml::Value::Mapping(m_map) => {
+                                            if let Some(m_api_val) = m_map.get_mut(&api_key) {
+                                                let m_api_str = match m_api_val.as_str() {
+                                                    Some(s) => s.trim(),
+                                                    None => return Err(format!("Model #{} in provider '{prov_id}' 'api' must be a string", idx + 1)),
+                                                };
+                                                if m_api_str == "openai-chat" {
+                                                    *m_api_val = serde_yaml::Value::String("openai-completions".to_string());
+                                                } else if !ALLOWED_APIS.contains(&m_api_str) {
+                                                    return Err(format!("Unsupported API '{m_api_str}' in model of provider '{prov_id}'"));
+                                                }
+                                            }
+                                        }
+                                        _ => return Err(format!("Model entry in provider '{prov_id}' must be a mapping")),
+                                    }
+                                }
+                            }
+                            serde_yaml::Value::Null => {}
+                            _ => return Err(format!("'models' in provider '{prov_id}' must be a sequence")),
+                        }
+                    }
+                }
+            }
+            serde_yaml::Value::Null => {}
+            _ => return Err("Invalid models config: 'providers' must be a mapping".into()),
+        }
+    }
+
+    serde_yaml::to_string(&parsed).map_err(|e| format!("Failed to serialize models YAML: {e}"))
+}
+
+fn sanitize_models_json(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Source provider file is empty".into());
+    }
+
+    let mut parsed: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| format!("Malformed JSON: {e}"))?;
+
+    let root_map = match &mut parsed {
+        serde_json::Value::Object(m) => m,
+        _ => return Err("Invalid models config: root must be an object".into()),
+    };
+
+    if let Some(prov_val) = root_map.get_mut("providers") {
+        match prov_val {
+            serde_json::Value::Object(providers_map) => {
+                for (prov_id, v) in providers_map.iter_mut() {
+                    let p_map = match v {
+                        serde_json::Value::Object(m) => m,
+                        _ => return Err(format!("Provider '{prov_id}' configuration must be an object")),
+                    };
+
+                    if let Some(url_val) = p_map.get("baseUrl") {
+                        if let Some(url_str) = url_val.as_str() {
+                            let u = url_str.trim();
+                            if !u.is_empty() {
+                                validate_http_url(u)?;
+                            }
+                        }
+                    }
+
+                    if let Some(api_val) = p_map.get_mut("api") {
+                        let api_str = match api_val.as_str() {
+                            Some(s) => s.trim(),
+                            None => return Err(format!("Provider '{prov_id}' 'api' must be a string")),
+                        };
+                        if api_str == "openai-chat" {
+                            *api_val = serde_json::Value::String("openai-completions".to_string());
+                        } else if !ALLOWED_APIS.contains(&api_str) {
+                            return Err(format!("Unsupported API '{api_str}' in provider '{prov_id}'"));
+                        }
+                    }
+
+                    if let Some(models_val) = p_map.get_mut("models") {
+                        match models_val {
+                            serde_json::Value::Array(models_seq) => {
+                                for (idx, m) in models_seq.iter_mut().enumerate() {
+                                    match m {
+                                        serde_json::Value::Object(m_map) => {
+                                            if let Some(m_api_val) = m_map.get_mut("api") {
+                                                let m_api_str = match m_api_val.as_str() {
+                                                    Some(s) => s.trim(),
+                                                    None => return Err(format!("Model #{} in provider '{prov_id}' 'api' must be a string", idx + 1)),
+                                                };
+                                                if m_api_str == "openai-chat" {
+                                                    *m_api_val = serde_json::Value::String("openai-completions".to_string());
+                                                } else if !ALLOWED_APIS.contains(&m_api_str) {
+                                                    return Err(format!("Unsupported API '{m_api_str}' in model of provider '{prov_id}'"));
+                                                }
+                                            }
+                                        }
+                                        _ => return Err(format!("Model entry in provider '{prov_id}' must be an object")),
+                                    }
+                                }
+                            }
+                            serde_json::Value::Null => {}
+                            _ => return Err(format!("'models' in provider '{prov_id}' must be an array")),
+                        }
+                    }
+                }
+            }
+            serde_json::Value::Null => {}
+            _ => return Err("Invalid models config: 'providers' must be an object".into()),
+        }
+    }
+
+    serde_json::to_string_pretty(&parsed).map_err(|e| format!("Failed to serialize models JSON: {e}"))
+}
+
+fn sanitize_and_normalize_models(raw: &str, filename: &str) -> Result<String, String> {
+    if filename.ends_with(".json") {
+        sanitize_models_json(raw)
+    } else {
+        sanitize_models_yaml(raw)
+    }
+}
+
+
+fn parse_yaml_providers(raw: &str) -> Result<Vec<Value>, String> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let parsed: serde_yaml::Value = serde_yaml::from_str(raw)
+        .map_err(|e| format!("Malformed YAML: {e}"))?;
+
+    match parsed {
+        serde_yaml::Value::Null => Ok(Vec::new()),
+        serde_yaml::Value::Mapping(root_map) => {
+            let providers_key = serde_yaml::Value::String("providers".to_string());
+            let prov_val = match root_map.get(&providers_key) {
+                Some(v) => v,
+                None => return Ok(Vec::new()),
+            };
+
+            match prov_val {
+                serde_yaml::Value::Null => Ok(Vec::new()),
+                serde_yaml::Value::Mapping(providers_map) => {
+                    let mut configured_providers = Vec::new();
+                    for (k, v) in providers_map {
+                        let id = match k {
+                            serde_yaml::Value::String(s) => s.clone(),
+                            serde_yaml::Value::Number(n) => n.to_string(),
+                            _ => continue,
+                        };
+
+                        let (has_key, base_url, api) = match v {
+                            serde_yaml::Value::Mapping(p_map) => {
+                                let key_val = p_map.get(&serde_yaml::Value::String("apiKey".to_string()));
+                                let has_key = match key_val {
+                                    Some(serde_yaml::Value::String(s)) => !s.trim().is_empty(),
+                                    Some(serde_yaml::Value::Number(_)) => true,
+                                    _ => false,
+                                };
+
+                                let base_url = match p_map.get(&serde_yaml::Value::String("baseUrl".to_string())) {
+                                    Some(serde_yaml::Value::String(s)) => {
+                                        let trimmed = s.trim();
+                                        if trimmed.is_empty() {
+                                            Value::Null
+                                        } else {
+                                            Value::String(trimmed.to_string())
+                                        }
+                                    }
+                                    _ => Value::Null,
+                                };
+
+                                let api = match p_map.get(&serde_yaml::Value::String("api".to_string())) {
+                                    Some(serde_yaml::Value::String(s)) => {
+                                        let trimmed = s.trim();
+                                        if trimmed.is_empty() {
+                                            Value::Null
+                                        } else if trimmed == "openai-chat" {
+                                            Value::String("openai-completions".to_string())
+                                        } else {
+                                            Value::String(trimmed.to_string())
+                                        }
+                                    }
+                                    _ => {
+                                        if let Some(serde_yaml::Value::Sequence(seq)) = p_map.get(&serde_yaml::Value::String("models".to_string())) {
+                                            seq.first()
+                                                .and_then(|m| m.as_mapping())
+                                                .and_then(|m| m.get(&serde_yaml::Value::String("api".to_string())))
+                                                .and_then(|a| a.as_str())
+                                                .map(|s| {
+                                                    let trimmed = s.trim();
+                                                    if trimmed == "openai-chat" {
+                                                        Value::String("openai-completions".to_string())
+                                                    } else {
+                                                        Value::String(trimmed.to_string())
+                                                    }
+                                                })
+                                                .unwrap_or(Value::Null)
+                                        } else {
+                                            Value::Null
+                                        }
+                                    }
+                                };
+
+                                (has_key, base_url, api)
+                            }
+                            _ => (false, Value::Null, Value::Null),
+                        };
+
+                        configured_providers.push(json!({
+                            "id": id,
+                            "hasKey": has_key,
+                            "baseUrl": base_url,
+                            "api": api,
+                        }));
+                    }
+                    Ok(configured_providers)
+                }
+                _ => Err("Invalid models config: 'providers' must be a mapping".to_string()),
+            }
+        }
+        _ => Err("Invalid models config: root must be a mapping".to_string()),
+    }
+}
+
+fn update_yaml_providers(
+    raw: &str,
+    target_prov: &str,
+    updates: &serde_yaml::Mapping,
+) -> Result<String, String> {
+    let mut root_val = if raw.trim().is_empty() {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    } else {
+        let parsed: serde_yaml::Value = serde_yaml::from_str(raw)
+            .map_err(|e| format!("Malformed YAML: {e}"))?;
+        match parsed {
+            serde_yaml::Value::Null => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            m @ serde_yaml::Value::Mapping(_) => m,
+            _ => return Err("Invalid models config: root must be a mapping".to_string()),
+        }
+    };
+
+    let root_map = root_val
+        .as_mapping_mut()
+        .ok_or_else(|| "Invalid models config: root must be a mapping".to_string())?;
+
+    let providers_key = serde_yaml::Value::String("providers".to_string());
+    if !root_map.contains_key(&providers_key) || root_map.get(&providers_key) == Some(&serde_yaml::Value::Null) {
+        root_map.insert(
+            providers_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+
+    let providers_val = root_map
+        .get_mut(&providers_key)
+        .ok_or_else(|| "Failed to access 'providers' mapping".to_string())?;
+
+    let providers_map = match providers_val {
+        serde_yaml::Value::Mapping(m) => m,
+        _ => return Err("Invalid models config: 'providers' must be a mapping".to_string()),
+    };
+
+    let target_key = serde_yaml::Value::String(target_prov.to_string());
+    if let Some(existing_entry) = providers_map.get_mut(&target_key) {
+        match existing_entry {
+            serde_yaml::Value::Mapping(existing_map) => {
+                for (k, v) in updates {
+                    if k == &serde_yaml::Value::String("models".to_string()) {
+                        let models_key = serde_yaml::Value::String("models".to_string());
+                        if let Some(serde_yaml::Value::Sequence(existing_models)) = existing_map.get_mut(&models_key) {
+                            if let serde_yaml::Value::Sequence(new_models) = v {
+                                for new_m in new_models {
+                                    let new_id = new_m.as_mapping().and_then(|m| m.get(&serde_yaml::Value::String("id".to_string())));
+                                    if let Some(target_id) = new_id {
+                                        if let Some(pos) = existing_models.iter().position(|em| {
+                                            em.as_mapping().and_then(|m| m.get(&serde_yaml::Value::String("id".to_string()))) == Some(target_id)
+                                        }) {
+                                            existing_models[pos] = new_m.clone();
+                                        } else {
+                                            existing_models.push(new_m.clone());
+                                        }
+                                    } else {
+                                        existing_models.push(new_m.clone());
+                                    }
+                                }
+                            } else {
+                                existing_map.insert(k.clone(), v.clone());
+                            }
+                        } else {
+                            existing_map.insert(k.clone(), v.clone());
+                        }
+                    } else {
+                        existing_map.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            _ => {
+                *existing_entry = serde_yaml::Value::Mapping(updates.clone());
+            }
+        }
+    } else {
+        providers_map.insert(target_key, serde_yaml::Value::Mapping(updates.clone()));
+    }
+
+    serde_yaml::to_string(&root_val).map_err(|e| format!("Failed to serialize models YAML: {e}"))
+}
+
+fn get_canonical_models_file(profile_dir: &Path) -> (PathBuf, bool) {
+    let yml = profile_dir.join("models.yml");
+    if yml.exists() {
+        return (yml, true);
+    }
+    let yaml = profile_dir.join("models.yaml");
+    if yaml.exists() {
+        return (yaml, true);
+    }
+    (yml, false)
+}
+
+fn migrate_models_json_to_yaml(profile_dir: &Path, val: &Value) -> Result<(), String> {
+    let mut providers_map = serde_yaml::Mapping::new();
+    if let Some(providers) = val.get("providers").and_then(Value::as_object) {
+        for (name, pval) in providers {
+            let key = pval.get("apiKey").and_then(Value::as_str).unwrap_or("").trim();
+            if key.is_empty() {
+                continue;
+            }
+            let base_url = pval.get("baseUrl").and_then(Value::as_str).map(|s| s.trim()).filter(|s| !s.is_empty());
+            let is_builtin = BUILTIN_PROVIDERS.contains(&name.as_str());
+
+            let mut prov_entry = serde_yaml::Mapping::new();
+            prov_entry.insert(
+                serde_yaml::Value::String("apiKey".to_string()),
+                serde_yaml::Value::String(key.to_string()),
+            );
+            if let Some(u) = base_url {
+                prov_entry.insert(
+                    serde_yaml::Value::String("baseUrl".to_string()),
+                    serde_yaml::Value::String(u.to_string()),
+                );
+            }
+
+            if !is_builtin {
+                let raw_api = pval.get("api").and_then(Value::as_str).unwrap_or("openai-completions");
+                let api_kind = if raw_api == "openai-chat" || !ALLOWED_APIS.contains(&raw_api) {
+                    "openai-completions"
+                } else {
+                    raw_api
+                };
+                prov_entry.insert(
+                    serde_yaml::Value::String("api".to_string()),
+                    serde_yaml::Value::String(api_kind.to_string()),
+                );
+
+                if let Some(models) = pval.get("models").and_then(Value::as_array) {
+                    if !models.is_empty() {
+                        let mut models_seq = Vec::new();
+                        for m in models {
+                            let mid = m.get("id").and_then(Value::as_str).unwrap_or("model");
+                            let mut m_map = serde_yaml::Mapping::new();
+                            m_map.insert(
+                                serde_yaml::Value::String("id".to_string()),
+                                serde_yaml::Value::String(mid.to_string()),
+                            );
+                            m_map.insert(
+                                serde_yaml::Value::String("name".to_string()),
+                                serde_yaml::Value::String(mid.to_string()),
+                            );
+                            m_map.insert(
+                                serde_yaml::Value::String("api".to_string()),
+                                serde_yaml::Value::String(api_kind.to_string()),
+                            );
+                            models_seq.push(serde_yaml::Value::Mapping(m_map));
+                        }
+                        prov_entry.insert(
+                            serde_yaml::Value::String("models".to_string()),
+                            serde_yaml::Value::Sequence(models_seq),
+                        );
+                    }
+                }
+            }
+
+            providers_map.insert(
+                serde_yaml::Value::String(name.clone()),
+                serde_yaml::Value::Mapping(prov_entry),
+            );
+        }
+    }
+
+    let mut root_map = serde_yaml::Mapping::new();
+    root_map.insert(
+        serde_yaml::Value::String("providers".to_string()),
+        serde_yaml::Value::Mapping(providers_map),
+    );
+    let root_val = serde_yaml::Value::Mapping(root_map);
+    let out = serde_yaml::to_string(&root_val)
+        .map_err(|e| format!("Failed to serialize models YAML: {e}"))?;
+
+    let (target, _) = get_canonical_models_file(profile_dir);
+    let target_name = target.file_name().and_then(|f| f.to_str()).unwrap_or("models.yml");
+    let tmp = profile_dir.join(format!(".{}.tmp-mig-{}", target_name, std::process::id()));
+    {
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        f.write_all(out.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    Ok(())
+}
+
 #[tauri::command]
-fn provider_save_key(
+async fn provider_save_key(
     app: tauri::AppHandle,
     provider: String,
     api_key: String,
@@ -982,71 +1893,134 @@ fn provider_save_key(
         return Err("Invalid API key length (must be 1..4096 characters)".into());
     }
 
-    let profile_dir = engine_profile_dir(&app)?;
-    let models_file = profile_dir.join("models.json");
+    let is_builtin = BUILTIN_PROVIDERS.contains(&prov.as_str());
 
-    let mut doc: Value = if models_file.exists() {
-        let raw = std::fs::read_to_string(&models_file).map_err(|e| format!("Failed to read models.json: {e}"))?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| json!({"providers": {}}))
-    } else {
-        json!({"providers": {}})
-    };
-
-    if !doc.is_object() {
-        doc = json!({"providers": {}});
-    }
-
-    let providers = doc.as_object_mut().unwrap().entry("providers").or_insert_with(|| json!({}));
-    if !providers.is_object() {
-        *providers = json!({});
-    }
-
-    let api_kind = api.as_deref().unwrap_or_else(|| match prov.as_str() {
-        "anthropic" => "anthropic-messages",
-        "openai" => "openai-chat",
-        "google" => "google-generative-ai",
-        _ => "openai-chat",
-    });
-
-    let mut entry = json!({
-        "apiKey": key,
-        "api": api_kind,
-    });
-
-    if let Some(url) = &base_url {
+    let clean_base_url = if let Some(url) = base_url {
         let u = url.trim();
         if !u.is_empty() {
-            if u.len() > 2048 {
-                return Err("baseUrl exceeds maximum length (2048)".into());
+            // Full validation with DNS resolution
+            let validated = provider_endpoint::validate_provider_base_url(u).await?;
+            // Enforce HTTPS for non-loopback at save time
+            if validated.scheme == "http" && !validated.is_loopback {
+                return Err("HTTP only allowed for verified loopback (localhost, 127.0.0.1, ::1)".into());
             }
-            entry["baseUrl"] = json!(u);
+            // If private endpoint, require trust
+            if validated.requires_trust {
+                return Err(format!("Private endpoint requires explicit trust confirmation. Fingerprint: {}", validated.trust_fingerprint.unwrap_or_default()));
+            }
+            Some(u.to_string())
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    if !is_builtin && clean_base_url.is_none() {
+        return Err("Base URL (http:// or https://) is required for custom/proxy providers".into());
     }
 
-    if let Some(mid) = &model_id {
+    let clean_model_id = if let Some(mid) = model_id {
         let m = mid.trim();
         if !m.is_empty() {
-            entry["models"] = json!([{
-                "id": m,
-                "name": m,
-                "api": api_kind
-            }]);
+            if m.len() > 128 {
+                return Err("model_id exceeds maximum length (128)".into());
+            }
+            Some(m.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if !is_builtin && clean_model_id.is_none() {
+        return Err("Nonempty model ID is required for custom/proxy providers".into());
+    }
+
+    let api_kind = if !is_builtin {
+        let requested = api.as_deref().unwrap_or("openai-completions").trim();
+        let selected = if requested.is_empty() {
+            "openai-completions"
+        } else {
+            requested
+        };
+        if selected == "openai-chat" {
+            return Err("Invalid api 'openai-chat'. Use 'openai-completions' or valid OMP api.".into());
+        }
+        if !ALLOWED_APIS.contains(&selected) {
+            return Err(format!("Invalid api '{}'. Must be a supported OMP api.", selected));
+        }
+        Some(selected.to_string())
+    } else if clean_model_id.is_some() {
+        let requested = api.as_deref().unwrap_or("").trim();
+        if !requested.is_empty() {
+            if requested == "openai-chat" {
+                return Err("Invalid api 'openai-chat'. Use 'openai-completions' or valid OMP api.".into());
+            }
+            if !ALLOWED_APIS.contains(&requested) {
+                return Err(format!("Invalid api '{}'. Must be a supported OMP api.", requested));
+            }
+            Some(requested.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let profile_dir = engine_profile_dir(&app)?;
+    let canonical_yml = profile_dir.join("models.yml");
+    let canonical_yaml = profile_dir.join("models.yaml");
+    if !canonical_yml.exists() && !canonical_yaml.exists() {
+        let json_file = profile_dir.join("models.json");
+        if json_file.exists() {
+            let raw_json = std::fs::read_to_string(&json_file)
+                .map_err(|e| format!("Failed to read legacy models.json: {e}"))?;
+            let legacy: Value = serde_json::from_str(&raw_json)
+                .map_err(|_| "Legacy models.json is invalid; refuse to overwrite it".to_string())?;
+            migrate_models_json_to_yaml(&profile_dir, &legacy)?;
         }
     }
 
-    providers.as_object_mut().unwrap().insert(prov.clone(), entry);
+    let (models_file, _) = get_canonical_models_file(&profile_dir);
+    let existing_raw = if models_file.exists() {
+        std::fs::read_to_string(&models_file).map_err(|e| format!("Failed to read models config: {e}"))?
+    } else {
+        String::new()
+    };
 
-    let serialized = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    let tmp_file = profile_dir.join(format!(".models.json.tmp-{}", std::process::id()));
+    // Build updates directly with strict validation
+    let mut updates = serde_yaml::Mapping::new();
+    updates.insert(serde_yaml::Value::String("apiKey".to_string()), serde_yaml::Value::String(key.to_string()));
+    if let Some(ref url) = clean_base_url {
+        updates.insert(serde_yaml::Value::String("baseUrl".to_string()), serde_yaml::Value::String(url.clone()));
+    }
+    if let Some(ref api_val) = api_kind {
+        updates.insert(serde_yaml::Value::String("api".to_string()), serde_yaml::Value::String(api_val.clone()));
+    }
+    if let Some(ref mid) = clean_model_id {
+        updates.insert(serde_yaml::Value::String("modelId".to_string()), serde_yaml::Value::String(mid.clone()));
+    }
+
+    let updated_yaml = update_yaml_providers(&existing_raw, &prov, &updates)?;
+
+    let file_name = models_file.file_name().and_then(|f| f.to_str()).unwrap_or("models.yml");
+    let tmp_file = profile_dir.join(format!(".{}.tmp-{}", file_name, std::process::id()));
     {
         use std::io::Write as _;
-        let mut f = OpenOptions::new().write(true).create(true).truncate(true).open(&tmp_file).map_err(|e| e.to_string())?;
-        f.write_all(serialized.as_bytes()).map_err(|e| e.to_string())?;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_file)
+            .map_err(|e| e.to_string())?;
+        f.write_all(updated_yaml.as_bytes()).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
     }
     std::fs::rename(&tmp_file, &models_file).map_err(|e| {
         let _ = std::fs::remove_file(&tmp_file);
-        format!("Failed to commit models.json: {e}")
+        format!("Failed to commit {file_name}: {e}")
     })?;
 
     Ok(json!({
@@ -1059,8 +2033,21 @@ fn provider_save_key(
 #[tauri::command]
 fn provider_status(app: tauri::AppHandle) -> Result<Value, String> {
     let profile_dir = engine_profile_dir(&app)?;
-    let models_file = profile_dir.join("models.json");
-    if !models_file.exists() {
+    let (_, file_exists) = get_canonical_models_file(&profile_dir);
+
+    if !file_exists {
+        let json_file = profile_dir.join("models.json");
+        if json_file.exists() {
+            if let Ok(raw_json) = std::fs::read_to_string(&json_file) {
+                if let Ok(val) = serde_json::from_str::<Value>(&raw_json) {
+                    let _ = migrate_models_json_to_yaml(&profile_dir, &val);
+                }
+            }
+        }
+    }
+
+    let (models_file, file_exists) = get_canonical_models_file(&profile_dir);
+    if !file_exists {
         return Ok(json!({
             "configured": false,
             "providers": [],
@@ -1069,28 +2056,62 @@ fn provider_status(app: tauri::AppHandle) -> Result<Value, String> {
     }
 
     let raw = std::fs::read_to_string(&models_file).map_err(|e| e.to_string())?;
-    let val: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
-    let mut configured_providers = Vec::new();
-
-    if let Some(providers) = val.get("providers").and_then(Value::as_object) {
-        for (name, pval) in providers {
-            let has_key = pval.get("apiKey").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false);
-            configured_providers.push(json!({
-                "id": name,
-                "hasKey": has_key,
-                "baseUrl": pval.get("baseUrl").and_then(Value::as_str),
-                "api": pval.get("api").and_then(Value::as_str)
-            }));
-        }
-    }
-
+    let configured_providers = parse_yaml_providers(&raw)?;
     let configured = configured_providers.iter().any(|p| p.get("hasKey") == Some(&Value::Bool(true)));
+
     Ok(json!({
         "configured": configured,
         "providers": configured_providers,
         "modelsFilePresent": true
     }))
 }
+#[tauri::command]
+fn provider_trust_endpoint(
+    app: tauri::AppHandle,
+    scheme: String,
+    host: String,
+    port: u16,
+    note: Option<String>,
+) -> Result<Value, String> {
+    let profile_dir = engine_profile_dir(&app)?;
+    trust_endpoint(&scheme, &host, port, note, &profile_dir)?;
+    Ok(json!({"trusted": true, "scheme": scheme, "host": host, "port": port}))
+}
+
+#[tauri::command]
+fn provider_revoke_endpoint_trust(
+    app: tauri::AppHandle,
+    scheme: String,
+    host: String,
+    port: u16,
+) -> Result<Value, String> {
+    let profile_dir = engine_profile_dir(&app)?;
+    let removed = revoke_endpoint_trust(&scheme, &host, port, &profile_dir)?;
+    Ok(json!({"revoked": removed}))
+}
+
+#[tauri::command]
+fn provider_list_trusted_endpoints() -> Result<Value, String> {
+    let endpoints = list_trusted_endpoints();
+    Ok(json!({"endpoints": endpoints}))
+}
+
+#[tauri::command]
+async fn provider_validate_base_url(url: String) -> Result<Value, String> {
+    let validated = validate_provider_base_url(&url).await?;
+    Ok(json!({
+        "original": validated.original,
+        "scheme": validated.scheme,
+        "host": validated.host,
+        "port": validated.port,
+        "path": validated.path,
+        "isLoopback": validated.is_loopback,
+        "isPrivate": validated.is_private,
+        "resolvedIps": validated.resolved_ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
+        "requiresTrust": validated.requires_trust,
+    }))
+}
+
 
 #[tauri::command]
 fn data_root_status(app: tauri::AppHandle) -> Result<Value, String> {
@@ -1188,4 +2209,151 @@ fn recover_data_root(app: tauri::AppHandle) -> Result<Value, String> {
     owned_root(&home, ".canopi-owner")?;
 
     data_root_status(app)
+}
+
+fn build_provider_updates(
+    provider: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    api: Option<&str>,
+    model_id: Option<&str>,
+) -> Result<serde_yaml::Mapping, String> {
+    let prov = provider.trim().to_lowercase();
+    if prov.is_empty() || prov.len() > 64 || !prov.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("Invalid provider name (1..64 alphanumeric, dash, or underscore)".into());
+    }
+    let key = api_key.trim();
+    if key.is_empty() || key.len() > 4096 {
+        return Err("Invalid API key length (must be 1..4096 characters)".into());
+    }
+
+    let is_builtin = BUILTIN_PROVIDERS.contains(&prov.as_str());
+
+    let clean_base_url = if let Some(url) = base_url {
+        let u = url.trim();
+        if !u.is_empty() {
+            validate_http_url(u)?;
+            Some(u.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if !is_builtin && clean_base_url.is_none() {
+        return Err("Base URL (http:// or https://) is required for custom/proxy providers".into());
+    }
+
+    let clean_model_id = if let Some(mid) = model_id {
+        let m = mid.trim();
+        if !m.is_empty() {
+            if m.len() > 128 {
+                return Err("model_id exceeds maximum length (128)".into());
+            }
+            Some(m.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if !is_builtin && clean_model_id.is_none() {
+        return Err("Nonempty model ID is required for custom/proxy providers".into());
+    }
+
+    let api_kind = if !is_builtin {
+        let requested = api.unwrap_or("openai-completions").trim();
+        let selected = if requested.is_empty() {
+            "openai-completions"
+        } else {
+            requested
+        };
+        if selected == "openai-chat" {
+            return Err("Invalid api 'openai-chat'. Use 'openai-completions' or valid OMP api.".into());
+        }
+        if !ALLOWED_APIS.contains(&selected) {
+            return Err(format!("Invalid api '{}'. Must be a supported OMP api.", selected));
+        }
+        Some(selected.to_string())
+    } else if clean_model_id.is_some() {
+        let requested = api.unwrap_or("").trim();
+        if !requested.is_empty() {
+            if requested == "openai-chat" {
+                return Err("Invalid api 'openai-chat'. Use 'openai-completions' or valid OMP api.".into());
+            }
+            if !ALLOWED_APIS.contains(&requested) {
+                return Err(format!("Invalid api '{}'. Must be a supported OMP api.", requested));
+            }
+            Some(requested.to_string())
+        } else {
+            Some(default_api_for_provider(&prov).to_string())
+        }
+    } else {
+        None
+    };
+
+    let mut updates = serde_yaml::Mapping::new();
+    updates.insert(
+        serde_yaml::Value::String("apiKey".to_string()),
+        serde_yaml::Value::String(key.to_string()),
+    );
+    if let Some(u) = &clean_base_url {
+        updates.insert(
+            serde_yaml::Value::String("baseUrl".to_string()),
+            serde_yaml::Value::String(u.clone()),
+        );
+    }
+    if !is_builtin {
+        if let Some(a) = &api_kind {
+            updates.insert(
+                serde_yaml::Value::String("api".to_string()),
+                serde_yaml::Value::String(a.clone()),
+            );
+        }
+    }
+    if let Some(m) = &clean_model_id {
+        if let Some(a) = &api_kind {
+            let mut model_map = serde_yaml::Mapping::new();
+            model_map.insert(
+                serde_yaml::Value::String("id".to_string()),
+                serde_yaml::Value::String(m.clone()),
+            );
+            model_map.insert(
+                serde_yaml::Value::String("name".to_string()),
+                serde_yaml::Value::String(m.clone()),
+            );
+            model_map.insert(
+                serde_yaml::Value::String("api".to_string()),
+                serde_yaml::Value::String(a.clone()),
+            );
+            model_map.insert(
+                serde_yaml::Value::String("contextWindow".to_string()),
+                serde_yaml::Value::Number(128_000.into()),
+            );
+            model_map.insert(
+                serde_yaml::Value::String("maxTokens".to_string()),
+                serde_yaml::Value::Number(16_384.into()),
+            );
+            let mut cost = serde_yaml::Mapping::new();
+            for k in ["input", "output", "cacheRead", "cacheWrite"] {
+                cost.insert(serde_yaml::Value::String(k.to_string()), serde_yaml::Value::Number(0.into()));
+            }
+            model_map.insert(
+                serde_yaml::Value::String("cost".to_string()),
+                serde_yaml::Value::Mapping(cost),
+            );
+            model_map.insert(
+                serde_yaml::Value::String("input".to_string()),
+                serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("text".to_string())]),
+            );
+            updates.insert(
+                serde_yaml::Value::String("models".to_string()),
+                serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(model_map)]),
+            );
+        }
+    }
+
+    Ok(updates)
 }

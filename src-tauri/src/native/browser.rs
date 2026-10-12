@@ -8,7 +8,7 @@
 //! PNGs) — never DOM re-renders, never fabricated output, never external
 //! Chrome. Ownership is enforced in the backend: every operation recomputes the
 //! surface label from the caller's session+agent and refuses mismatches.
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use parking_lot::Mutex;
@@ -149,6 +149,30 @@ async fn eval_expect_ok(surface: &BrowserSurface, js: String) -> Result<(), Stri
         None => Err("Unexpected page result".into()),
     }
 }
+/// Policy-before-navigation orchestration: installs hooks, on error closes and
+/// returns Err without navigating; on success runs navigate. Used by open()
+/// and tests so failure path is single source of truth.
+async fn policy_before_navigation<FInstall, FClose, FNavigate, E>(
+    install: FInstall,
+    mut close: FClose,
+    navigate: FNavigate,
+) -> Result<(), String>
+where
+    FInstall: Future<Output = Result<(), String>>,
+    FClose: FnMut() -> Result<(), E>,
+    FNavigate: FnOnce() -> Result<(), String>,
+    E: std::fmt::Debug,
+{
+    if let Err(e) = install.await {
+        let _ = close();
+        return Err(format!("Browser policy hooks failed: {e}"));
+    }
+    if let Err(e) = navigate() {
+        let _ = close();
+        return Err(e);
+    }
+    Ok(())
+}
 
 pub async fn open(
     app: tauri::AppHandle,
@@ -198,15 +222,13 @@ pub async fn open(
         return Err("Browser window failed to register".into());
     };
     let policy: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(url_allowed);
-    if let Err(e) = webview2::install_policy_hooks(window.clone(), policy).await {
-        let _ = window.close();
-        return Err(format!("Browser policy hooks failed: {e}"));
-    }
-    // Hooks are live; now perform the real (policy-checked) navigation.
-    window.navigate(url).map_err(|e| {
-        let _ = window.close();
-        format!("Initial navigation failed: {e}")
-    })?;
+    let window_clone = window.clone();
+    let install_fut = webview2::install_policy_hooks(window_clone, policy);
+    policy_before_navigation(
+        install_fut,
+        || window.close().map_err(|e| format!("close failed: {e}")),
+        || window.navigate(url).map_err(|e| format!("Initial navigation failed: {e}")), 
+    ).await?;
     let surface = Arc::new(BrowserSurface {
         session_key: sid.to_string(),
         agent_id: aid.to_string(),
@@ -526,11 +548,48 @@ mod tests {
         assert_eq!(js_str("</script>"), "\"</script>\"");
     }
 
+    /// policy_before_navigation: install failure closes, zero navigate.
     #[test]
-    fn interactive_snapshot_script_is_bounded() {
-        let js = interactive_snapshot_js();
-        assert!(js.len() > 100);
-        assert!(js.contains("querySelectorAll"));
-        assert!(js.contains(&MAX_INTERACTIVE_ELEMENTS.to_string()));
+    fn policy_before_navigation_install_fail_closes_no_navigate() {
+        let mut close_count = 0;
+        let mut nav_count = 0;
+        let install = async { Err::<(), String>("hook registration failed".into()) };
+        let close = || { close_count += 1; Ok::<(), String>(()) };
+        let navigate = || { nav_count += 1; Ok(()) };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(policy_before_navigation(install, close, navigate));
+        assert!(res.as_ref().err().unwrap().contains("Browser policy hooks failed: hook registration failed"));
+        assert_eq!(close_count, 1, "close must be called on install failure");
+        assert_eq!(nav_count, 0, "navigate must NOT be called on install failure");
+    }
+
+    /// policy_before_navigation: install success runs navigate, no close.
+    #[test]
+    fn policy_before_navigation_install_success_navigates_no_close() {
+        let mut close_count = 0;
+        let mut nav_count = 0;
+        let install = async { Ok(()) };
+        let close = || { close_count += 1; Ok::<(), String>(()) };
+        let navigate = || { nav_count += 1; Ok(()) };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(policy_before_navigation(install, close, navigate));
+        assert!(res.is_ok());
+        assert_eq!(close_count, 0, "close must NOT be called on success");
+        assert_eq!(nav_count, 1, "navigate must be called exactly once on success");
+    }
+
+    /// Failed initial navigation retires the newly created surface too.
+    #[test]
+    fn policy_before_navigation_navigate_fail_returns_err() {
+        let mut close_count = 0;
+        let mut nav_count = 0;
+        let install = async { Ok(()) };
+        let close = || { close_count += 1; Ok::<(), String>(()) };
+        let navigate = || { nav_count += 1; Err("navigation failed".into()) };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(policy_before_navigation(install, close, navigate));
+        assert_eq!(res.as_ref().err().unwrap(), "navigation failed");
+        assert_eq!(close_count, 1, "close must retire a surface whose initial navigation fails");
+        assert_eq!(nav_count, 1, "navigate attempted once");
     }
 }

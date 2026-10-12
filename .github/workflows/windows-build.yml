@@ -1,18 +1,60 @@
 name: canoPi Windows source build and smoke
 on:
   workflow_dispatch:
+    inputs:
+      releaseMode:
+        description: 'Build mode: Development (unsigned) or Signed (requires certificate secrets)'
+        required: true
+        default: 'Development'
+        type: choice
+        options:
+          - Development
+          - Signed
   push:
     branches: [main]
 
 permissions:
   contents: read
 
+env:
+  # Expected certificate values from secrets (independent of runtime import)
+  CANOPI_CERT_THUMBPRINT: ${{ secrets.CANOPI_CERT_THUMBPRINT }}
+  CANOPI_CERT_SUBJECT: ${{ secrets.CANOPI_CERT_SUBJECT }}
+  CANOPI_CERT_DIGEST_ALGORITHM: ${{ secrets.CANOPI_CERT_DIGEST_ALGORITHM }}
+  CANOPI_CERT_TIMESTAMP_URL: ${{ secrets.CANOPI_CERT_TIMESTAMP_URL }}
+
 jobs:
   windows:
     runs-on: windows-2022
     timeout-minutes: 90
+    env:
+      RELEASE_MODE: ${{ github.event.inputs.releaseMode || 'Development' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Import Windows code-signing certificate (Signed mode only)
+        if: env.RELEASE_MODE == 'Signed'
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.CANOPI_CERT_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.CANOPI_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            throw 'Signed mode requires CANOPI_CERT_PFX and CANOPI_CERT_PASSWORD secrets (production signing certificate is an external prerequisite)'
+          }
+          $certDir = Join-Path $env:TEMP ('canopi-cert-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $certDir -Force | Out-Null
+          try {
+            Set-Content -Path (Join-Path $certDir 'tempCert.txt') -Value $env:WINDOWS_CERTIFICATE
+            certutil -decode (Join-Path $certDir 'tempCert.txt') (Join-Path $certDir 'certificate.pfx')
+            if ($LASTEXITCODE -ne 0) { throw "certutil -decode failed with exit code $LASTEXITCODE" }
+            Import-PfxCertificate -FilePath (Join-Path $certDir 'certificate.pfx') -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText) | Out-Null
+            Write-Host "Code signing certificate imported successfully"
+          } finally {
+            Remove-Item -LiteralPath $certDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Verify release-coherent worktree (tracked sources complete)
         shell: pwsh
         run: |
@@ -20,6 +62,7 @@ jobs:
           $porcelain = @(git status --porcelain)
           $bad = @($porcelain | Where-Object { $_ -match '^\?\?|^ D' })
           if ($bad.Count -gt 0) { throw "Worktree not release-coherent (untracked or deleted-but-unstaged tracked files): $($bad -join '; ')" }
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -37,6 +80,15 @@ jobs:
           bun --version
           cargo --version
           python --version
+      - name: Install 7-Zip (Signed mode only)
+        if: env.RELEASE_MODE == 'Signed'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            choco install 7zip -y --no-progress
+          }
+          7z --version
       - name: Clone pinned Oh My Pi source (not the prebuilt release)
         shell: pwsh
         run: |
@@ -109,8 +161,145 @@ jobs:
       - name: Compile and test Rust IPC
         working-directory: src-tauri
         run: cargo test
-      - name: Build NSIS Windows installer
-        run: npm run package:windows
+
+      # ---------------- SIGNED MODE: Sign engine BEFORE packaging ----------------
+      - name: Sign engine binary (Signed mode only)
+        if: env.RELEASE_MODE == 'Signed'
+        env:
+          CANOPI_CERT_THUMBPRINT: ${{ secrets.CANOPI_CERT_THUMBPRINT }}
+          CANOPI_CERT_SUBJECT: ${{ secrets.CANOPI_CERT_SUBJECT }}
+          CANOPI_CERT_TIMESTAMP_URL: ${{ secrets.CANOPI_CERT_TIMESTAMP_URL }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:CANOPI_CERT_THUMBPRINT -or -not $env:CANOPI_CERT_SUBJECT) { throw 'Signed mode requires CANOPI_CERT_THUMBPRINT and CANOPI_CERT_SUBJECT secrets' }
+          $stagedEngine = 'src-tauri/resources/engine/cnp-engine.exe'
+          if (-not (Test-Path -LiteralPath $stagedEngine -PathType Leaf)) { throw "Staged engine not found at $stagedEngine" }
+          $signScript = (Resolve-Path "scripts/sign-engine.ps1").Path
+          & $signScript -BinaryPath $stagedEngine -Thumbprint $env:CANOPI_CERT_THUMBPRINT -Subject $env:CANOPI_CERT_SUBJECT -TimestampUrl $env:CANOPI_CERT_TIMESTAMP_URL
+
+      # ---------------- PACKAGE ----------------
+      - name: Build NSIS Windows installer (Tauri)
+        env:
+          TAURI_SIGNING_CERTIFICATE_THUMBPRINT: ${{ secrets.CANOPI_CERT_THUMBPRINT }}
+          TAURI_SIGNING_DIGEST_ALGORITHM: ${{ secrets.CANOPI_CERT_DIGEST_ALGORITHM }}
+          TAURI_SIGNING_TIMESTAMP_URL: ${{ secrets.CANOPI_CERT_TIMESTAMP_URL }}
+          TAURI_SIGNING_TSP: "true"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseMode = "$env:RELEASE_MODE"
+          if ($releaseMode -eq 'Signed') {
+            if (-not "${{ secrets.CANOPI_CERT_THUMBPRINT }}") { throw 'ReleaseMode=Signed requires CANOPI_CERT_THUMBPRINT secret' }
+            # Generate Tauri signing config override
+            $signScript = (Resolve-Path "scripts/sign-engine.ps1").Path
+            $configObj = [ordered]@{
+              bundle = @{
+                windows = @{
+                  certificateThumbprint = "${{ secrets.CANOPI_CERT_THUMBPRINT }}"
+                  digestAlgorithm = "${{ secrets.CANOPI_CERT_DIGEST_ALGORITHM }}"
+                  timestampUrl = "${{ secrets.CANOPI_CERT_TIMESTAMP_URL }}"
+                  tsp = $true
+                  signCommand = @{
+                    cmd = 'powershell.exe'
+                    args = @(
+                      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $signScript,
+                      '-BinaryPath', '%1',
+                      '-Thumbprint', "${{ secrets.CANOPI_CERT_THUMBPRINT }}",
+                      '-Subject', "${{ secrets.CANOPI_CERT_SUBJECT }}",
+                      '-TimestampUrl', "${{ secrets.CANOPI_CERT_TIMESTAMP_URL }}"
+                    )
+                  }
+                }
+              }
+            }
+            $configPath = Join-Path $env:TEMP ('tauri-signing-config-' + [guid]::NewGuid().ToString('N') + '.json')
+            $configObj | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $configPath -Encoding UTF8
+            npm run package:windows -- --config $configPath
+          } else {
+            Write-Host "Building DEVELOPMENT installer (unsigned)"
+            npm run package:windows
+          }
+
+      # ---------------- VERIFY ----------------
+      - name: Verify Authenticode signatures on all shipped executables
+        if: env.RELEASE_MODE == 'Signed'
+        env:
+          EXPECTED_THUMBPRINT: ${{ secrets.CANOPI_CERT_THUMBPRINT }}
+          EXPECTED_SUBJECT: ${{ secrets.CANOPI_CERT_SUBJECT }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedThumbprint = "$env:EXPECTED_THUMBPRINT".ToUpper().Replace(' ', '')
+          $expectedSubject = "$env:EXPECTED_SUBJECT"
+          if (-not $expectedThumbprint) { throw 'EXPECTED_THUMBPRINT required for Signed mode' }
+          if (-not $expectedSubject) { throw 'EXPECTED_SUBJECT required for Signed mode' }
+          $bins = @(
+            'src-tauri/target/release/canoPi.exe',
+            'src-tauri/target/release/engine/cnp-engine.exe',
+            'src-tauri/target/release/bundle/nsis/*.exe'
+          )
+          $allValid = $true
+          foreach ($pattern in $bins) {
+            $files = @(Get-ChildItem $pattern -File -ErrorAction SilentlyContinue)
+            if ($files.Count -eq 0) {
+              Write-Error "SIGNATURE FAIL: no files matched $pattern - cannot claim all shipped executables are signed"
+              $allValid = $false
+              continue
+            }
+            foreach ($file in $files) {
+              $sig = Get-AuthenticodeSignature -FilePath $file.FullName
+              $valid = $sig.Status -eq 'Valid'
+              $thumbprint = "$($sig.SignerCertificate.Thumbprint)".ToUpper()
+              $match = $thumbprint -eq $expectedThumbprint
+              $subject = "$($sig.SignerCertificate.Subject)"
+              $subjectMatch = $subject -eq $expectedSubject
+              $tsCert = $sig.TimeStamperCertificate
+              if (-not $valid -or -not $match -or -not $subjectMatch -or -not $tsCert) {
+                Write-Error "SIGNATURE FAIL: $($file.FullName) Status=$($sig.Status) Thumbprint=$thumbprint Expected=$expectedThumbprint Subject=$subject ExpectedSubject=$expectedSubject TimeStamper=$([bool]$tsCert)"
+                $allValid = $false
+              } else {
+                Write-Host "OK: $($file.FullName) Valid issuer=$subject Thumbprint=$thumbprint TimeStamper=$($tsCert.Subject)"
+              }
+            }
+          }
+          if (-not $allValid) { throw 'One or more shipped executables failed Authenticode verification' }
+          Write-Host "All executables have valid Authenticode signatures with expected thumbprint, subject, and RFC3161 timestamp"
+
+      - name: Verify embedded uninstaller signature (Signed mode only)
+        if: env.RELEASE_MODE == 'Signed'
+        env:
+          EXPECTED_THUMBPRINT: ${{ secrets.CANOPI_CERT_THUMBPRINT }}
+          EXPECTED_SUBJECT: ${{ secrets.CANOPI_CERT_SUBJECT }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter *.exe -File)[0]
+          $extractDir = Join-Path $env:TEMP ('cnp-extract-' + [guid]::NewGuid().ToString('N'))
+          try {
+            New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+            & 7z x $installer.FullName -o$extractDir -y | Out-Null
+            $uninstaller = Get-ChildItem -LiteralPath $extractDir -Filter 'uninstall*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($uninstaller) {
+              $uninstSig = Get-AuthenticodeSignature -FilePath $uninstaller.FullName
+              $expectedThumbprint = "$env:EXPECTED_THUMBPRINT".ToUpper().Replace(' ', '')
+              $expectedSubject = "$env:EXPECTED_SUBJECT"
+              $uninstValid = $uninstSig.Status -eq 'Valid'
+              $uninstThumbprint = $uninstSig.SignerCertificate.Thumbprint.ToUpper()
+              $uninstMatch = $uninstThumbprint -eq $expectedThumbprint
+              $uninstSubject = $uninstSig.SignerCertificate.Subject
+              $uninstSubjectMatch = $uninstSubject -eq $expectedSubject
+              $uninstTsCert = $uninstSig.TimeStamperCertificate
+              if (-not $uninstValid -or -not $uninstMatch -or -not $uninstSubjectMatch -or -not $uninstTsCert) {
+                throw "EMBEDDED UNINSTALLER SIGNATURE FAIL: $($uninstaller.FullName) Status=$($uninstSig.Status) Thumbprint=$uninstThumbprint Expected=$expectedThumbprint Subject=$uninstSubject ExpectedSubject=$expectedSubject TimeStamper=$([bool]$uninstTsCert)"
+              }
+              Write-Host "OK: Embedded uninstaller $($uninstaller.Name) Valid issuer=$uninstSubject Thumbprint=$uninstThumbprint TimeStamper=$($uninstTsCert.Subject)"
+            } else {
+              throw "Embedded uninstaller not found in installer"
+            }
+          } finally {
+            if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+
       - name: PE verify installer and preserve checksums
         shell: pwsh
         run: |

@@ -78,18 +78,18 @@ All release artifacts reside in `release/`:
 
 | Artifact | File Size (bytes) | SHA256 Hash |
 |---|---|---|
-| `canoPi-Setup-1.0.0-win-x64.exe` | 114,110,571 | `E3B9066D5A86470DDFBC117FBED06674B98BE0F6E07B073EB4D2C3CD96499316` |
-| `canoPi-source-1.0.0.zip` | 420,406 | `980C31DC2A6ECB89CFCCE3E745351547A86ADA1C0F883932084CD46099C550FF` |
-| `canoPi-windows-installer.zip` | 114,127,569 | `F1B9993949D76441E793EFFADEFFD11F9D0AD5B7F168F363D75D9E28038247EB` |
+| `canoPi-Setup-1.0.0-win-x64.exe` | 114,096,108 | `3724F2D97E5040DFEEA0ADC06720A512D02CFBF8AE000BD1D868122B9381C7A3` |
+| `canoPi-source-1.0.0.zip` | 420,578 | `8CC08399DDDBFF0FC999315D855F46E44860A0E9B734BAF00BB30752674184CC` |
+| `canoPi-windows-installer.zip` | 114,113,101 | `0283418735DB400395C77640C4EDD2E72B3030A6D9F52467FED570B226954200` |
 | `ENGINE-PROVENANCE.json` | 883 | `785353767590BB4E828344BB545F1681941DDDCC084FFF36261E996005A5ADAE` |
-| `BUILD-MANIFEST.json` | 3,245 | `C0E056630EEF29F57759E09FD3A301CCE9E07B226C9A121E200899BA8693EBE7` |
+| `BUILD-MANIFEST.json` | 3,245 | `CEA56B3C1A87FBDAD416B835C4DA363E809A42D412C179DD031E811D9E115DF1` |
 | `SHA256SUMS.txt` | 465 | *(covers the 5 primary artifacts above; byte-for-byte verified)* |
 | `RELEASE_TEST_REPORT.md` | 8,835 | *(evidence report generated last)* |
 
 Installer binary format: verified Windows PE (`MZ` header present, length > 100 MiB).
 
 `canoPi-windows-installer.zip` contains:
-- `canoPi-Setup-1.0.0-win-x64.exe` (114,110,571 bytes)
+- `canoPi-Setup-1.0.0-win-x64.exe` (114,096,108 bytes)
 - `ENGINE-PROVENANCE.json` (883 bytes)
 - `BUILD-MANIFEST.json` (3,245 bytes)
 - `SHA256SUMS.txt` (278 bytes, covering the 3 bundle files)
@@ -134,4 +134,4 @@ Honest scope per PRD / test matrix:
    - Static disposable-profile tests in `test-uninstall-data.ps1` verified ownership-marker checking and junction refusal; full OS-level multi-user / upgrade VM matrix rows (WU01-WU12, A-003, A-019-A-023) are recorded as `NOT RUN` pending dedicated clean-VM runs.
 3. **No fake provider turn**: Engine RPC v2 handshake smoke validated protocol exchange (`ready`, `protocol v2`, `open_session`, `get_state`). No simulated model generation or fake provider credentials were used.
 4. **No interactive browser session claimed**: Native WebView2 backend and PTY reaper passed automated unit/integration tests; live web browsing was not executed.
-5. **Verified Installed Launch Smoke**: Installed desktop executable was launched against pre-existing legacy `EBWebView` data root without marker; successfully claimed root without `Cannot claim nonempty unowned root` error; window screenshot captured into `release/evidence/canoPi-installed-launch.png` (687,606 bytes).
+5. **Verified Installed Launch Smoke**: Installed desktop executable was launched against pre-existing legacy `EBWebView` data root without marker; successfully claimed root without `Cannot claim nonempty unowned root` error; window screenshot captured into `release/evidence/canoPi-installed-launch.png` (659,307 bytes, SHA256 `6499E0E8002070CE5C2F43745C319D43668B1717B1A4E5E928238D3FCD6BCAA3`).

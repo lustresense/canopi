@@ -21,6 +21,7 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
 mod imp {
     use super::{CAPTURE_TIMEOUT, EXEC_TIMEOUT, MAX_CAPTURE_BYTES};
     use std::sync::Arc;
+    use tokio::sync::oneshot;
 
     use parking_lot::Mutex;
     use tauri::WebviewWindow;
@@ -179,74 +180,93 @@ mod imp {
         s
     }
 
-    /// Enforces browsing policy inside the real WebView2 surface:
-    /// - `NavigationStarting`: any navigation whose URL fails the owner's
-    ///   policy (same rules as programmatic navigation) is cancelled.
-    /// - `NewWindowRequested`: popups are consumed without creating any window,
-    ///   so no surface can appear outside the owned registry.
-    /// - `PermissionRequested`: camera/microphone/location/notifications/
-    ///   clipboard-read style permissions are denied by default.
+
+    /// Production sequencing seam: first failed registration stops setup.
+    pub(super) fn run_registration_sequence<F1, F2, F3, E>(step1: F1, step2: F2, step3: F3) -> Result<(), String>
+    where
+        F1: FnOnce() -> Result<(), E>,
+        F2: FnOnce() -> Result<(), E>,
+        F3: FnOnce() -> Result<(), E>,
+        E: std::fmt::Debug,
+    {
+        step1().map_err(|e| format!("add_NavigationStarting failed: {e:?}"))?;
+        step2().map_err(|e| format!("add_NewWindowRequested failed: {e:?}"))?;
+        step3().map_err(|e| format!("add_PermissionRequested failed: {e:?}"))?;
+        Ok(())
+    }
+
     pub async fn install_policy_hooks(
         window: WebviewWindow,
         policy: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     ) -> Result<(), String> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
         let worker = window.clone();
-        let hook_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let hook_error_inner = hook_error.clone();
-        tauri::async_runtime::spawn_blocking(move || {
+        let nav_policy = policy.clone();
+        let join = tauri::async_runtime::spawn_blocking(move || {
             worker.with_webview(move |pw| {
                 let core = match unsafe { pw.controller().CoreWebView2() } {
                     Ok(core) => core,
                     Err(e) => {
-                        *hook_error_inner.lock() = Some(format!("WebView2 core unavailable: {e}"));
+                        let _ = tx.send(Err(format!("WebView2 core unavailable: {e}")));
                         return;
                     }
                 };
-                let nav_policy = policy.clone();
-                let nav = NavigationStartingEventHandler::create(Box::new(
-                    move |_sender, args: Option<ICoreWebView2NavigationStartingEventArgs>| {
-                        if let Some(args) = args {
-                            let uri = read_pwstr(|pw| unsafe { args.Uri(pw) });
-                            if !uri.is_empty() && !nav_policy(&uri) {
-                                let _ = unsafe { args.SetCancel(true) };
-                            }
-                        }
-                        Ok(())
+                let res = run_registration_sequence(
+                    || {
+                        let nav = NavigationStartingEventHandler::create(Box::new(
+                            move |_sender, args: Option<ICoreWebView2NavigationStartingEventArgs>| {
+                                if let Some(args) = args {
+                                    let uri = read_pwstr(|pw| unsafe { args.Uri(pw) });
+                                    if !uri.is_empty() && !nav_policy(&uri) {
+                                        let _ = unsafe { args.SetCancel(true) };
+                                    }
+                                }
+                                Ok(())
+                            },
+                        ));
+                        let mut token = 0i64;
+                        unsafe { core.add_NavigationStarting(&nav, &mut token) }
                     },
-                ));
-                let mut token = 0i64;
-                let _ = unsafe { core.add_NavigationStarting(&nav, &mut token) };
-
-                let popups = NewWindowRequestedEventHandler::create(Box::new(
-                    move |_sender, args: Option<ICoreWebView2NewWindowRequestedEventArgs>| {
-                        if let Some(args) = args {
-                            let _ = unsafe { args.SetHandled(true) };
-                        }
-                        Ok(())
+                    || {
+                        let popups = NewWindowRequestedEventHandler::create(Box::new(
+                            move |_sender, args: Option<ICoreWebView2NewWindowRequestedEventArgs>| {
+                                if let Some(args) = args {
+                                    let _ = unsafe { args.SetHandled(true) };
+                                }
+                                Ok(())
+                            },
+                        ));
+                        let mut token = 0i64;
+                        unsafe { core.add_NewWindowRequested(&popups, &mut token) }
                     },
-                ));
-                let mut token = 0i64;
-                let _ = unsafe { core.add_NewWindowRequested(&popups, &mut token) };
-
-                let perms = PermissionRequestedEventHandler::create(Box::new(
-                    move |_sender, args: Option<ICoreWebView2PermissionRequestedEventArgs>| {
-                        if let Some(args) = args {
-                            let _ = unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
-                        }
-                        Ok(())
+                    || {
+                        let perms = PermissionRequestedEventHandler::create(Box::new(
+                            move |_sender, args: Option<ICoreWebView2PermissionRequestedEventArgs>| {
+                                if let Some(args) = args {
+                                    let _ = unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
+                                }
+                                Ok(())
+                            },
+                        ));
+                        let mut token = 0i64;
+                        unsafe { core.add_PermissionRequested(&perms, &mut token) }
                     },
-                ));
-                let mut token = 0i64;
-                let _ = unsafe { core.add_PermissionRequested(&perms, &mut token) };
-            })
-        })
-        .await
-        .map_err(|e| format!("WebView2 dispatch task failed: {e}"))?
-        .map_err(|e| format!("WebView2 access failed: {e}"))?;
-        if let Some(err) = hook_error.lock().take() {
-            return Err(err);
+                );
+                let _ = tx.send(res);
+            }).map_err(|e| format!("WebView2 with_webview failed: {e}"))
+        });
+        // Wait for dispatch task to complete or timeout
+        match tokio::time::timeout(std::time::Duration::from_secs(10), join).await {
+            Ok(Ok(res)) => res?,
+            Ok(Err(e)) => return Err(format!("WebView2 with_webview failed: {e}")),
+            Err(_) => return Err("install_policy_hooks: dispatch timeout".into()),
         }
-        Ok(())
+        // Then wait for registration result
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => Err(format!("WebView2 registration channel error: {e}")),
+            Err(_) => Err("install_policy_hooks: registration timeout".into()),
+        }
     }
 }
 
@@ -273,6 +293,20 @@ mod imp {
     ) -> Result<(), String> {
         Err("WebView2 browser control is Windows-only in this build".into())
     }
+
+    #[cfg(test)]
+    pub(super) fn run_registration_sequence<F1, F2, F3, E>(step1: F1, step2: F2, step3: F3) -> Result<(), String>
+    where
+        F1: FnOnce() -> Result<(), E>,
+        F2: FnOnce() -> Result<(), E>,
+        F3: FnOnce() -> Result<(), E>,
+        E: std::fmt::Debug,
+    {
+        step1().map_err(|e| format!("add_NavigationStarting failed: {e:?}"))?;
+        step2().map_err(|e| format!("add_NewWindowRequested failed: {e:?}"))?;
+        step3().map_err(|e| format!("add_PermissionRequested failed: {e:?}"))?;
+        Ok(())
+    }
 }
 
 /// Parses width/height from a real PNG's IHDR chunk; `None` when the bytes are
@@ -288,7 +322,7 @@ pub fn png_dims(png: &[u8]) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::png_dims;
+    use super::{png_dims, imp::run_registration_sequence};
 
     /// PNG structural check on synthetic bytes: proves the parser used for
     /// real captures validates signature and dimensions (no GUI needed).
@@ -301,5 +335,28 @@ mod tests {
         png.extend_from_slice(&1080u32.to_be_bytes());
         assert_eq!(png_dims(&png), Some((1920, 1080)));
         assert_eq!(png_dims(b"not a png"), None);
+    }
+
+    #[test]
+    fn registration_failure_stops_later_handlers() {
+        use std::cell::Cell;
+        for failure in 0..3 {
+            let calls=Cell::new(0);
+            let step=|index| { calls.set(calls.get()+1); if index==failure { Err("registration failed") } else { Ok(()) } };
+            let result = run_registration_sequence(|| step(0), || step(1), || step(2));
+            assert!(result.is_err());
+            assert_eq!(calls.get(), failure + 1);
+            let err = result.unwrap_err();
+            match failure {
+                0 => assert!(err.contains("add_NavigationStarting failed")),
+                1 => assert!(err.contains("add_NewWindowRequested failed")),
+                2 => assert!(err.contains("add_PermissionRequested failed")),
+                _ => unreachable!(),
+            }
+        }
+        let calls=Cell::new(0);
+        let step=|| { calls.set(calls.get()+1); Ok::<(), &str>(()) };
+        assert_eq!(run_registration_sequence(step,step,step),Ok(()));
+        assert_eq!(calls.get(),3);
     }
 }

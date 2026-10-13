@@ -193,9 +193,27 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
 .cp .msg .body ul,.cp .msg .body ol{margin:.4em 0;padding-left:1.5em}
 .cp .msg .body li{margin:.18em 0}
 .cp .msg .body blockquote{margin:.5em 0;padding-left:11px;border-left:3px solid var(--accent-2);color:var(--text-3)}
+.cp .msg .body .table-wrap{overflow-x:auto;margin:.6em 0;max-width:100%;border-radius:8px;border:1px solid var(--border)}
+.cp .msg .body table.md-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.5}
+.cp .msg .body th,.cp .msg .body td{padding:7px 12px;border-bottom:1px solid var(--border);text-align:left}
+.cp .msg .body th{background:var(--glass-2);font-weight:600;color:var(--text)}
+.cp .msg .body tr:nth-child(even){background:var(--glass-3)}
+.cp .msg .body tbody tr:last-child td{border-bottom:0}
+.cp .msg .body hr.md-hr{border:0;border-top:1px solid var(--border);margin:.8em 0}
+.cp .msg .body a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.cp .msg .body li input[type=checkbox]{margin-right:.45em;vertical-align:middle;accent-color:var(--accent)}
+.cp .msg .body del{color:var(--text-3)}
 .cp .msg.user .body code{background:rgba(16,36,43,.07);border-color:rgba(16,36,43,.18);color:#10242B}
 .cp .msg.user .body pre{background:rgba(16,36,43,.06);border-color:rgba(16,36,43,.16);box-shadow:none;color:#183038}
 .cp .msg.user .body blockquote{border-left-color:rgba(16,36,43,.35);color:rgba(16,36,43,.72)}
+.cp .msg.user .body .table-wrap{border-color:rgba(16,36,43,.18)}
+.cp .msg.user .body table.md-table{color:#10242B}
+.cp .msg.user .body th{background:rgba(16,36,43,.06);color:#10242B;border-bottom-color:rgba(16,36,43,.18)}
+.cp .msg.user .body td{border-bottom-color:rgba(16,36,43,.14)}
+.cp .msg.user .body tr:nth-child(even){background:rgba(16,36,43,.05)}
+.cp .msg.user .body hr.md-hr{border-top-color:rgba(16,36,43,.28)}
+.cp .msg.user .body a{color:#0E6C82}
+.cp .msg.user .body del{color:rgba(16,36,43,.55)}
 .cp details.think{color:var(--text-3);font-size:13px;padding-left:2px}
 .cp details.think summary{cursor:pointer;font-weight:600;list-style:none}
 .cp details.think summary::-webkit-details-marker{display:none}

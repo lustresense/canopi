@@ -7,15 +7,31 @@
  * message text can never inject markup.
  *
  * Supported: headings (#, ##, ###, …), fenced code blocks, inline code,
- * bold (**x** / __x__), italic (*x* / _x_), unordered/ordered lists,
- * blockquotes, paragraphs with hard line breaks.
+ * bold (**x** / __x__), italic (*x* / _x_), strikethrough (~~x~~),
+ * links ([label](url) + bare URLs), unordered/ordered lists, task lists,
+ * tables, horizontal rules, blockquotes, paragraphs with hard line breaks.
  */
 import React, { useMemo } from 'react';
 
 /* ------------------------------- inline ---------------------------------- */
-/* Order matters: code spans, then ** / __ bold, then * / _ italic.
- * `_italic_` refuses intra-word matches so snake_case identifiers survive. */
-const INLINE_RE = /(`+)([\s\S]*?)\1|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\n]+?)\*|(?<![\w])_([^_\n]+?)_(?![\w])/g;
+/* Order matters: code spans, then links, bare URLs, strikethrough,
+ * then ** / __ bold, then * / _ italic. `_italic_` refuses intra-word
+ * matches so snake_case identifiers survive. */
+const INLINE_RE = /(`+)([\s\S]*?)\1|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|(https?:\/\/[^\s<]+)|~~([^~\n]+)~~|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\n]+?)\*|(?<![\w])_([^_\n]+?)_(?![\w])/g;
+
+/* Only http(s), mailto and relative paths may reach href. Anything with
+ * another scheme (javascript:, data:, vbscript:, …) is rejected outright;
+ * the scheme test runs on a whitespace-stripped copy so control-character
+ * smuggling (`java\nscript:`) is caught too. */
+export function safeUrl(raw) {
+  const u = String(raw == null ? '' : raw).trim();
+  if (!u) return null;
+  const probe = u.replace(/[\s\u0000-\u001f]+/g, '');
+  if (/^(https?:\/\/|mailto:)/i.test(probe)) return u;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(probe)) return null; /* any other scheme */
+  if (probe.startsWith('//')) return null; /* protocol-relative */
+  return u; /* relative path */
+}
 
 export function parseInline(src) {
   const out = [];
@@ -27,10 +43,13 @@ export function parseInline(src) {
   while ((m = re.exec(s))) {
     if (m.index > last) out.push(s.slice(last, m.index));
     if (m[1] !== undefined) out.push({ type: 'code', text: m[2] });
-    else if (m[3] !== undefined) out.push({ type: 'strong', children: parseInline(m[3]) });
-    else if (m[4] !== undefined) out.push({ type: 'strong', children: parseInline(m[4]) });
-    else if (m[5] !== undefined) out.push({ type: 'em', children: parseInline(m[5]) });
-    else out.push({ type: 'em', children: parseInline(m[6]) });
+    else if (m[3] !== undefined) out.push({ type: 'link', href: m[4], children: parseInline(m[3]) });
+    else if (m[5] !== undefined) out.push({ type: 'link', href: m[5], children: [m[5]] });
+    else if (m[6] !== undefined) out.push({ type: 'del', children: parseInline(m[6]) });
+    else if (m[7] !== undefined) out.push({ type: 'strong', children: parseInline(m[7]) });
+    else if (m[8] !== undefined) out.push({ type: 'strong', children: parseInline(m[8]) });
+    else if (m[9] !== undefined) out.push({ type: 'em', children: parseInline(m[9]) });
+    else out.push({ type: 'em', children: parseInline(m[10]) });
     last = re.lastIndex;
   }
   if (last < s.length) out.push(s.slice(last));
@@ -44,9 +63,29 @@ const RE_QUOTE = /^\s*>\s?(.*)$/;
 const RE_UL = /^\s*[-*+]\s+(.*)$/;
 const RE_OL = /^\s*(\d{1,9})[.)]\s+(.*)$/;
 const RE_FENCE_OPEN = /^\s*(`{3,}|~{3,})\s*([^\s`]*)\s*$/;
+const RE_HR = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
+const RE_TABLE_DELIM = /^\s*\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$/;
+const RE_TABLE_ROW = /[^|]*\|/;
+const RE_TASK = /^\[([ xX])\]\s+(.*)$/;
+
+/* Split one table row into trimmed cells; outer pipes optional, `\|` escapes. */
+function splitTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  return s.split('|').map(c => c.replace(/\\\|/g, '|').trim());
+}
+
+function alignOf(delimiterCell) {
+  const left = delimiterCell.startsWith(':');
+  const right = delimiterCell.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  return 'left';
+}
 
 const startsBlock = ln =>
-  RE_FENCE_OPEN.test(ln) || RE_HEADING.test(ln) || RE_QUOTE.test(ln) || RE_UL.test(ln) || RE_OL.test(ln);
+  RE_FENCE_OPEN.test(ln) || RE_HEADING.test(ln) || RE_HR.test(ln) || RE_QUOTE.test(ln) || RE_UL.test(ln) || RE_OL.test(ln);
 
 export function parseBlocks(content) {
   const lines = String(content == null ? '' : content).split(/\r\n|\r|\n/);
@@ -71,6 +110,28 @@ export function parseBlocks(content) {
 
     const heading = RE_HEADING.exec(line);
     if (heading) { blocks.push({ type: 'h', level: heading[1].length, text: heading[2].trim() }); i++; continue; }
+
+    if (RE_HR.test(line)) { blocks.push({ type: 'hr' }); i++; continue; }
+
+    /* GFM table: header row immediately followed by a delimiter row;
+     * header/delimiter cell counts must match or it stays a paragraph. */
+    if (RE_TABLE_ROW.test(line) && i + 1 < lines.length && RE_TABLE_DELIM.test(lines[i + 1])) {
+      const headers = splitTableRow(line);
+      const delims = splitTableRow(lines[i + 1]);
+      if (headers.length && headers.length === delims.length) {
+        const aligns = delims.map(alignOf);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && !RE_BLANK.test(lines[i]) && lines[i].includes('|')) {
+          const row = splitTableRow(lines[i]);
+          while (row.length < headers.length) row.push('');
+          rows.push(row.slice(0, headers.length));
+          i++;
+        }
+        blocks.push({ type: 'table', headers, aligns, rows });
+        continue;
+      }
+    }
 
     if (RE_QUOTE.test(line)) {
       const inner = [];
@@ -116,6 +177,12 @@ function inline(nodes, key) {
     if (n.type === 'code') return <code key={k}>{n.text}</code>;
     if (n.type === 'strong') return <strong key={k}>{inline(n.children, k)}</strong>;
     if (n.type === 'em') return <em key={k}>{inline(n.children, k)}</em>;
+    if (n.type === 'del') return <del key={k}>{inline(n.children, k)}</del>;
+    if (n.type === 'link') {
+      const href = safeUrl(n.href);
+      if (!href) return <span key={k}>{inline(n.children, k)}</span>; /* hostile scheme: text only */
+      return <a key={k} href={href} target="_blank" rel="noopener noreferrer">{inline(n.children, k)}</a>;
+    }
     return String(n);
   });
 }
@@ -128,6 +195,8 @@ function renderBlock(b, key) {
     }
     case 'code':
       return <pre key={key} data-lang={b.lang || undefined}><code>{b.text}</code></pre>;
+    case 'hr':
+      return <hr key={key} className="md-hr" />;
     case 'p':
       return (
         <p key={key}>
@@ -137,9 +206,45 @@ function renderBlock(b, key) {
         </p>
       );
     case 'ul':
-      return <ul key={key}>{b.items.map((it, idx) => <li key={`${key}.${idx}`}>{inline(parseInline(it), `${key}.${idx}`)}</li>)}</ul>;
+      return (
+        <ul key={key}>
+          {b.items.map((it, idx) => {
+            const k = `${key}.${idx}`;
+            const task = RE_TASK.exec(it);
+            if (task) {
+              const checked = task[1] !== ' ';
+              return (
+                <li key={k}>
+                  <input type="checkbox" checked={checked} disabled readOnly />
+                  {' '}{inline(parseInline(task[2]), k)}
+                </li>
+              );
+            }
+            return <li key={k}>{inline(parseInline(it), k)}</li>;
+          })}
+        </ul>
+      );
     case 'ol':
       return <ol key={key} start={b.start}>{b.items.map((it, idx) => <li key={`${key}.${idx}`}>{inline(parseInline(it), `${key}.${idx}`)}</li>)}</ol>;
+    case 'table':
+      return (
+        <div key={key} className="table-wrap">
+          <table className="md-table">
+            <thead>
+              <tr>{b.headers.map((h, ci) => (
+                <th key={ci} style={{ textAlign: b.aligns[ci] }}>{inline(parseInline(h), `${key}.h${ci}`)}</th>
+              ))}</tr>
+            </thead>
+            <tbody>
+              {b.rows.map((row, ri) => (
+                <tr key={ri}>{row.map((cell, ci) => (
+                  <td key={ci} style={{ textAlign: b.aligns[ci] }}>{inline(parseInline(cell), `${key}.${ri}.${ci}`)}</td>
+                ))}</tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
     case 'quote':
       return <blockquote key={key}>{b.blocks.map((bb, idx) => renderBlock(bb, `${key}.${idx}`))}</blockquote>;
     default:

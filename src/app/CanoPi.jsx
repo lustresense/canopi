@@ -13,6 +13,7 @@ import { subagentFrameId, subagentFrameEvent, workerStateFromStatus, toolCallIdO
 import { openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels, getProviderStatus, saveProviderKey, dataRootStatus, recoverDataRoot, trustProviderEndpoint, listTrustedProviderEndpoints, validateProviderBaseUrl } from '../runtime/native.js';
 import { ensureSessionModel, executeSessionStart } from '../runtime/session-bootstrap.mjs';
 import { createFrameAdmission } from '../runtime/event-queue.mjs';
+import { Markdown } from '../runtime/markdown.jsx';
 import {
   Folder, FolderOpen, SquarePen, Search, Kanban, Globe, Terminal, Settings, Sun, Moon, Menu, X, Plus,
   ChevronRight, ChevronDown, ChevronUp, Columns2, Maximize2, Minimize2, ArrowLeft, ArrowRight, ArrowUp,
@@ -177,6 +178,24 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
 .cp[data-theme="light"] .msg.user .body{color:#142830}
 .cp .msg.asst .body{font:400 14px/1.7 var(--font-sans);color:var(--text)}
 .cp .msg.notice{align-self:center;color:var(--text-3);font-size:12.5px;border:1px dashed var(--glass-line);border-radius:999px;padding:3px 12px}
+/* Markdown inside user/assistant message bodies */
+.cp .msg .body>*:first-child{margin-top:0}
+.cp .msg .body>*:last-child{margin-bottom:0}
+.cp .msg .body p{margin:.4em 0}
+.cp .msg .body h1,.cp .msg .body h2,.cp .msg .body h3,.cp .msg .body h4,.cp .msg .body h5,.cp .msg .body h6{font-weight:700;line-height:1.3;margin:.7em 0 .3em}
+.cp .msg .body h1{font-size:1.4em}
+.cp .msg .body h2{font-size:1.22em}
+.cp .msg .body h3{font-size:1.1em}
+.cp .msg .body h4,.cp .msg .body h5,.cp .msg .body h6{font-size:1em}
+.cp .msg .body pre{margin:.5em 0;padding:9px 12px;border:1px solid var(--border);border-radius:10px;background:var(--glass-2);box-shadow:inset 0 1px 0 var(--glass-hi);font-family:var(--font-mono);font-size:.92em;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:auto;color:var(--text-2)}
+.cp .msg .body code{font-family:var(--font-mono);font-size:.9em;background:var(--glass-2);border:1px solid var(--border);border-radius:5px;padding:.1em .38em;color:var(--text)}
+.cp .msg .body pre code{font-size:1em;background:none;border:0;padding:0;color:inherit}
+.cp .msg .body ul,.cp .msg .body ol{margin:.4em 0;padding-left:1.5em}
+.cp .msg .body li{margin:.18em 0}
+.cp .msg .body blockquote{margin:.5em 0;padding-left:11px;border-left:3px solid var(--accent-2);color:var(--text-3)}
+.cp .msg.user .body code{background:rgba(16,36,43,.07);border-color:rgba(16,36,43,.18);color:#10242B}
+.cp .msg.user .body pre{background:rgba(16,36,43,.06);border-color:rgba(16,36,43,.16);box-shadow:none;color:#183038}
+.cp .msg.user .body blockquote{border-left-color:rgba(16,36,43,.35);color:rgba(16,36,43,.72)}
 .cp details.think{color:var(--text-3);font-size:13px;padding-left:2px}
 .cp details.think summary{cursor:pointer;font-weight:600;list-style:none}
 .cp details.think summary::-webkit-details-marker{display:none}
@@ -1545,8 +1564,8 @@ function Transcript({ tkey, msgs, ctx, label, id }) {
 }
 function Msg({ m, ctx }) {
   switch (m.role) {
-    case 'user': return <article className="msg user"><div className="body">{m.text}</div></article>;
-    case 'asst': return <article className="msg asst"><div className="body">{m.text}</div></article>;
+    case 'user': return <article className="msg user"><div className="body"><Markdown content={m.text} /></div></article>;
+    case 'asst': return <article className="msg asst"><div className="body"><Markdown content={m.text} /></div></article>;
     case 'think': return <details className="think"><summary>Thinking</summary><p>{m.text}</p></details>;
     case 'notice': return <div className="msg notice">{m.text}</div>;
     case 'tool': return <ToolRow m={m} ctx={ctx} />;

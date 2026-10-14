@@ -355,6 +355,46 @@ fn emit(app: &tauri::AppHandle, key: &str, generation: u64, frame: Value) {
 }
 
 #[tauri::command]
+fn window_minimize(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.minimize().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn window_maximize(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.is_maximized().map_err(|e| e.to_string())? {
+        window.unmaximize().map_err(|e| e.to_string())
+    } else {
+        window.maximize().map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn window_close(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn window_start_dragging(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn ReleaseCapture() -> i32;
+            fn SendMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+        }
+        const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+        const HTCAPTION: usize = 2;
+        if let Ok(hwnd) = window.hwnd() {
+            unsafe {
+                ReleaseCapture();
+                SendMessageW(hwnd.0 as _, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
+            return Ok(());
+        }
+    }
+    window.start_dragging().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn runtime_info(app: tauri::AppHandle) -> Value {
     match engine_path(&app) {
         Ok(path) => json!({"available":true,"engine":"cnp-engine","binaryFound":true,"path":path.to_string_lossy(),"mode":"rpc-ui","handshakeVerified":false}),
@@ -724,11 +764,57 @@ async fn rpc_stop(app: tauri::AppHandle, state: tauri::State<'_, Supervisor>, se
     Ok(())
 }
 
+// Native Windows 11 title bar: vibrant light-blue caption with dark ink text
+// via DWM (DWMWA_CAPTION_COLOR/DWMWA_TEXT_COLOR, build 22000+). The API is
+// resolved at runtime through GetProcAddress, so there is no link-time dwmapi
+// dependency; older builds that reject the attribute (E_INVALIDARG) simply
+// keep the standard title bar color.
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn LoadLibraryW(name: *const u16) -> *mut core::ffi::c_void;
+    fn GetProcAddress(module: *mut core::ffi::c_void, name: *const u8) -> *mut core::ffi::c_void;
+}
+
+#[cfg(windows)]
+fn apply_native_titlebar_colors(window: &tauri::WebviewWindow) {
+    use core::ffi::c_void;
+    type DwmSetWindowAttributeFn =
+        unsafe extern "system" fn(hwnd: isize, attribute: u32, value: *const c_void, size: u32) -> i32;
+    const DWMWA_CAPTION_COLOR: u32 = 35;
+    const DWMWA_TEXT_COLOR: u32 = 36;
+    // COLORREF is 0x00BBGGRR: caption RGB(140, 205, 213), text RGB(0, 0, 0).
+    const CAPTION_COLOR: u32 = 0x00D5_CD8C;
+    const TEXT_COLOR: u32 = 0x0000_0000;
+    let Ok(hwnd) = window.hwnd() else { return };
+    let hwnd = hwnd.0 as isize;
+    unsafe {
+        // L"dwmapi.dll"
+        const DWMAPI_DLL: [u16; 11] = [100, 119, 109, 97, 112, 105, 46, 100, 108, 108, 0];
+        let module = LoadLibraryW(DWMAPI_DLL.as_ptr());
+        if module.is_null() { return; }
+        let raw = GetProcAddress(module, b"DwmSetWindowAttribute\0".as_ptr());
+        if raw.is_null() { return; }
+        let dwm_set_window_attribute: DwmSetWindowAttributeFn = core::mem::transmute(raw);
+        dwm_set_window_attribute(hwnd, DWMWA_CAPTION_COLOR, &CAPTION_COLOR as *const u32 as *const c_void, 4);
+        dwm_set_window_attribute(hwnd, DWMWA_TEXT_COLOR, &TEXT_COLOR as *const u32 as *const c_void, 4);
+    }
+}
+
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Supervisor::default())
-        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models, provider_save_key, provider_status, provider_trust_endpoint, provider_revoke_endpoint_trust, provider_list_trusted_endpoints, provider_validate_base_url, data_root_status, recover_data_root])
+        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, window_minimize, window_maximize, window_close, window_start_dragging, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models, provider_save_key, provider_status, provider_trust_endpoint, provider_revoke_endpoint_trust, provider_list_trusted_endpoints, provider_validate_base_url, data_root_status, recover_data_root])
+        .setup(|app| {
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                apply_native_titlebar_colors(&window);
+            }
+            let _ = app;
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Only the main window owns full application shutdown. Auxiliary
@@ -1056,6 +1142,7 @@ providers:
         let empty = providers.iter().find(|p| p["id"] == "empty").unwrap();
         assert_eq!(empty["hasKey"], false);
     }
+
 
     #[test]
     fn parse_yaml_providers_fails_on_malformed_yaml_or_invalid_structure() {
@@ -2109,9 +2196,9 @@ async fn provider_validate_base_url(url: String) -> Result<Value, String> {
         "isPrivate": validated.is_private,
         "resolvedIps": validated.resolved_ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
         "requiresTrust": validated.requires_trust,
+        "isNeverTrustable": validated.is_never_trustable,
     }))
 }
-
 
 #[tauri::command]
 fn data_root_status(app: tauri::AppHandle) -> Result<Value, String> {

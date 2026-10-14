@@ -6,6 +6,20 @@ import { invoke } from '@tauri-apps/api/core';
 import { inDesktop } from './omp.js';
 
 const requireDesktop = () => { if (!inDesktop()) throw new Error('Only available in canoPi Desktop'); };
+
+export async function windowMinimize() {
+  requireDesktop(); return invoke('window_minimize');
+}
+export async function windowMaximize() {
+  requireDesktop(); return invoke('window_maximize');
+}
+export async function windowClose() {
+  requireDesktop(); return invoke('window_close');
+}
+export async function windowStartDragging() {
+  requireDesktop(); return invoke('window_start_dragging');
+}
+
 export async function openAgentBrowser(sessionKey,agentId,url) {
   requireDesktop();return invoke('browser_open',{sessionKey,agentId,url});
 }

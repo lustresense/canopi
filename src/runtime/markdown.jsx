@@ -13,11 +13,10 @@
  */
 import React, { useMemo } from 'react';
 
-/* ------------------------------- inline ---------------------------------- */
-/* Order matters: code spans, then links, bare URLs, strikethrough,
+/* Order matters: code spans, inline math ($...$), then links, bare URLs, strikethrough,
  * then ** / __ bold, then * / _ italic. `_italic_` refuses intra-word
  * matches so snake_case identifiers survive. */
-const INLINE_RE = /(`+)([\s\S]*?)\1|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|(https?:\/\/[^\s<]+)|~~([^~\n]+)~~|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\n]+?)\*|(?<![\w])_([^_\n]+?)_(?![\w])/g;
+const INLINE_RE = /(`+)([\s\S]*?)\1|\$([^\$\n]+?)\$|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|(https?:\/\/[^\s<]+)|~~([^~\n]+)~~|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\n]+?)\*|(?<![\w])_([^_\n]+?)_(?![\w])/g;
 
 /* Only http(s), mailto and relative paths may reach href. Anything with
  * another scheme (javascript:, data:, vbscript:, …) is rejected outright;
@@ -43,13 +42,14 @@ export function parseInline(src) {
   while ((m = re.exec(s))) {
     if (m.index > last) out.push(s.slice(last, m.index));
     if (m[1] !== undefined) out.push({ type: 'code', text: m[2] });
-    else if (m[3] !== undefined) out.push({ type: 'link', href: m[4], children: parseInline(m[3]) });
-    else if (m[5] !== undefined) out.push({ type: 'link', href: m[5], children: [m[5]] });
-    else if (m[6] !== undefined) out.push({ type: 'del', children: parseInline(m[6]) });
-    else if (m[7] !== undefined) out.push({ type: 'strong', children: parseInline(m[7]) });
+    else if (m[3] !== undefined) out.push({ type: 'math', text: m[3] });
+    else if (m[4] !== undefined) out.push({ type: 'link', href: m[5], children: parseInline(m[4]) });
+    else if (m[6] !== undefined) out.push({ type: 'link', href: m[6], children: [m[6]] });
+    else if (m[7] !== undefined) out.push({ type: 'del', children: parseInline(m[7]) });
     else if (m[8] !== undefined) out.push({ type: 'strong', children: parseInline(m[8]) });
-    else if (m[9] !== undefined) out.push({ type: 'em', children: parseInline(m[9]) });
-    else out.push({ type: 'em', children: parseInline(m[10]) });
+    else if (m[9] !== undefined) out.push({ type: 'strong', children: parseInline(m[9]) });
+    else if (m[10] !== undefined) out.push({ type: 'em', children: parseInline(m[10]) });
+    else out.push({ type: 'em', children: parseInline(m[11]) });
     last = re.lastIndex;
   }
   if (last < s.length) out.push(s.slice(last));
@@ -67,6 +67,11 @@ const RE_HR = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
 const RE_TABLE_DELIM = /^\s*\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$/;
 const RE_TABLE_ROW = /[^|]*\|/;
 const RE_TASK = /^\[([ xX])\]\s+(.*)$/;
+const RE_MATH_BLOCK_SINGLE = /^\s*\$\$([\s\S]+?)\$\$\s*$/;
+const RE_MATH_BLOCK_OPEN = /^\s*\$\$\s*$/;
+const RE_DETAILS_OPEN = /^\s*<details(?:\s+open)?>/i;
+const RE_DETAILS_CLOSE = /^\s*<\/details>\s*$/i;
+const RE_SUMMARY = /<summary>([\s\S]*?)<\/summary>/i;
 
 /* Split one table row into trimmed cells; outer pipes optional, `\|` escapes. */
 function splitTableRow(line) {
@@ -133,18 +138,49 @@ export function parseBlocks(content) {
       }
     }
 
-    if (RE_QUOTE.test(line)) {
-      const inner = [];
-      while (i < lines.length && RE_QUOTE.test(lines[i])) { inner.push(lines[i].replace(RE_QUOTE, '$1')); i++; }
-      blocks.push({ type: 'quote', blocks: parseBlocks(inner.join('\n')) });
+    /* Block math: $$...$$ on single line or multi-line */
+    const mathSingle = RE_MATH_BLOCK_SINGLE.exec(line);
+    if (mathSingle) {
+      blocks.push({ type: 'math', text: mathSingle[1].trim() });
+      i++;
+      continue;
+    }
+    if (RE_MATH_BLOCK_OPEN.test(line)) {
+      i++;
+      const buf = [];
+      while (i < lines.length && !RE_MATH_BLOCK_OPEN.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      blocks.push({ type: 'math', text: buf.join('\n').trim() });
+      continue;
+    }
+
+    /* HTML <details> / <summary> */
+    const detailsOpen = RE_DETAILS_OPEN.exec(line);
+    if (detailsOpen) {
+      const isOpen = /open/i.test(detailsOpen[0]);
+      i++;
+      const buf = [];
+      while (i < lines.length && !RE_DETAILS_CLOSE.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      const fullContent = buf.join('\n');
+      const summaryMatch = RE_SUMMARY.exec(fullContent);
+      const summary = summaryMatch ? summaryMatch[1].trim() : '';
+      const content = fullContent.replace(RE_SUMMARY, '').trim();
+      blocks.push({ type: 'details', open: isOpen, summary, content });
       continue;
     }
 
     if (RE_UL.test(line)) {
       const items = [];
       let m;
-      while (i < lines.length && (m = RE_UL.exec(lines[i]))) { items.push(m[1].trim()); i++; }
-      blocks.push({ type: 'ul', items });
+      let isTask = false;
+      while (i < lines.length && (m = RE_UL.exec(lines[i]))) {
+        const itemText = m[1].trim();
+        if (RE_TASK.test(itemText)) isTask = true;
+        items.push(itemText);
+        i++;
+      }
+      blocks.push({ type: 'ul', isTask, items });
       continue;
     }
 
@@ -175,6 +211,7 @@ function inline(nodes, key) {
     const k = `${key}.${idx}`;
     if (typeof n === 'string') return n;
     if (n.type === 'code') return <code key={k}>{n.text}</code>;
+    if (n.type === 'math') return <code key={k} className="md-math-inline">{n.text}</code>;
     if (n.type === 'strong') return <strong key={k}>{inline(n.children, k)}</strong>;
     if (n.type === 'em') return <em key={k}>{inline(n.children, k)}</em>;
     if (n.type === 'del') return <del key={k}>{inline(n.children, k)}</del>;
@@ -194,6 +231,22 @@ function renderBlock(b, key) {
       return <Tag key={key}>{inline(parseInline(b.text), `${key}.t`)}</Tag>;
     }
     case 'code':
+      if (b.lang === 'diff') {
+        const lines = b.text.split('\n');
+        return (
+          <pre key={key} data-lang="diff">
+            <code>{lines.map((line, li) => {
+              if (line.startsWith('+') && !line.startsWith('+++')) {
+                return <span key={li} className="diff-add">{line}{'\n'}</span>;
+              }
+              if (line.startsWith('-') && !line.startsWith('---')) {
+                return <span key={li} className="diff-del">{line}{'\n'}</span>;
+              }
+              return <span key={li}>{line}{'\n'}</span>;
+            })}</code>
+          </pre>
+        );
+      }
       return <pre key={key} data-lang={b.lang || undefined}><code>{b.text}</code></pre>;
     case 'hr':
       return <hr key={key} className="md-hr" />;
@@ -207,14 +260,14 @@ function renderBlock(b, key) {
       );
     case 'ul':
       return (
-        <ul key={key}>
+        <ul key={key} className={b.isTask ? "task-list" : undefined}>
           {b.items.map((it, idx) => {
             const k = `${key}.${idx}`;
             const task = RE_TASK.exec(it);
             if (task) {
               const checked = task[1] !== ' ';
               return (
-                <li key={k}>
+                <li key={k} className="task-list-item">
                   <input type="checkbox" checked={checked} disabled readOnly />
                   {' '}{inline(parseInline(task[2]), k)}
                 </li>
@@ -247,6 +300,15 @@ function renderBlock(b, key) {
       );
     case 'quote':
       return <blockquote key={key}>{b.blocks.map((bb, idx) => renderBlock(bb, `${key}.${idx}`))}</blockquote>;
+    case 'math':
+      return <div key={key} className="md-math" tabIndex={0} role="region" aria-label="Math formula"><code>{b.text}</code></div>;
+    case 'details':
+      return (
+        <details key={key} className="md-details" open={b.open || undefined}>
+          <summary>{inline(parseInline(b.summary), `${key}.s`)}</summary>
+          <div className="md-details-body">{parseBlocks(b.content).map((cb, ci) => renderBlock(cb, `${key}.b${ci}`))}</div>
+        </details>
+      );
     default:
       return null;
   }

@@ -107,3 +107,56 @@ test('bold, italic, code still work alongside new syntax', () => {
   assert.match(html, /<del>s<\/del>/);
   assert.match(html, /<a href="https:\/\/a\.example"/);
 });
+
+test('inline math renders as code.md-math-inline', () => {
+  const blocks = md.parseBlocks('$E=mc^2$ inline');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, 'p');
+  const html = render('$E=mc^2$ inline');
+  assert.match(html, /<code class="md-math-inline">E=mc\^2<\/code>/);
+});
+
+test('block math renders as div.md-math', () => {
+  const blocks = md.parseBlocks('$$\nE=mc^2\n$$');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, 'math');
+  assert.match(blocks[0].text, /E=mc\^2/);
+  const html = render('$$\nE=mc^2\n$$');
+  assert.match(html, /<div class="md-math"[^>]*>/);
+  assert.match(html, /E=mc\^2/);
+});
+
+test('details/summary parse and render', () => {
+  const blocks = md.parseBlocks('<details>\n<summary>Click me</summary>\nHidden content\n</details>');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, 'details');
+  assert.equal(blocks[0].summary, 'Click me');
+  assert.match(blocks[0].content, /Hidden content/);
+  const html = render('<details>\n<summary>Click me</summary>\nHidden content\n</details>');
+  assert.match(html, /<details class="md-details"[^>]*>/);
+  assert.match(html, /<summary>Click me<\/summary>/);
+  assert.match(html, /<div class="md-details-body">/);
+});
+
+test('task list renders without bullet and checkbox', () => {
+  const blocks = md.parseBlocks('- [ ] Task 1\n- [x] Task 2');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, 'ul');
+  assert.ok(blocks[0].isTask);
+  assert.equal(blocks[0].items.length, 2);
+  const html = render('- [ ] Task 1\n- [x] Task 2');
+  assert.match(html, /<ul class="task-list">/);
+  assert.match(html, /<input type="checkbox" disabled[^>]*>/);
+  assert.match(html, /Task 1/);
+  assert.match(html, /Task 2/);
+});
+
+test('diff highlighting in code blocks', () => {
+  const blocks = md.parseBlocks('```diff\n- old line\n+ new line\n```');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, 'code');
+  assert.equal(blocks[0].lang, 'diff');
+  const html = render('```diff\n- old line\n+ new line\n```');
+  assert.match(html, /<span class="diff-del">- old line/);
+  assert.match(html, /<span class="diff-add">\+ new line/);
+});

@@ -35,10 +35,16 @@ test('provider onboarding is API-key-first and does not make 9Router default', (
   assert.match(react, /useState\(['"]anthropic['"]\)/);
   assert.match(react, /value="anthropic"/);
   assert.match(react, /value="openai"/);
+  assert.match(react, /value="google"/);
   assert.match(react, /value="openrouter"/);
-  assert.match(react, /value="9router"/);
-  // 9Router is marked optional
-  assert.match(react, /9Router \(optional local proxy\)/);
+  assert.match(react, /value="groq"/);
+  assert.match(react, /value="xai"/);
+  assert.match(react, /value="deepseek"/);
+  assert.match(react, /value="custom"/);
+  // 9Router, Mistral, Together should NOT be in the list
+  assert.doesNotMatch(react, /value="9router"/);
+  assert.doesNotMatch(react, /value="mistral"/);
+  assert.doesNotMatch(react, /value="together"/);
   // Input uses password field with autocomplete off
   assert.match(react, /type="password"/);
   assert.match(react, /autoComplete="off"/);
@@ -98,18 +104,19 @@ test('safe data root recovery is exposed in UI for unowned root startup failures
 });
 
 test('bundled provider choices and transport selector follow canonical OMP rules', () => {
-  // Real bundled provider choices offered in UI
+  // Real bundled provider choices offered in UI (strict list: Anthropic, OpenAI, Google Gemini, OpenRouter, Groq, xAI, DeepSeek, Custom)
   assert.match(react, /value="anthropic"/);
   assert.match(react, /value="openai"/);
   assert.match(react, /value="google"/);
   assert.match(react, /value="openrouter"/);
   assert.match(react, /value="groq"/);
-  assert.match(react, /value="mistral"/);
   assert.match(react, /value="xai"/);
   assert.match(react, /value="deepseek"/);
-  assert.match(react, /value="together"/);
   assert.match(react, /value="custom"/);
-  assert.match(react, /value="9router"/);
+  // 9Router, Mistral, Together should NOT be in the list
+  assert.doesNotMatch(react, /value="9router"/);
+  assert.doesNotMatch(react, /value="mistral"/);
+  assert.doesNotMatch(react, /value="together"/);
 
   // Custom transport API selector offers valid OMP values
   assert.match(react, /value="openai-completions"/);

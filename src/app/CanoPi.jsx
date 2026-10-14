@@ -10,14 +10,14 @@ import { projectAssistantFrame } from '../runtime/live-projection.mjs';
 import { projectToolActivity, upsertActivity, retainRows, mergeTranscriptSnapshot } from '../runtime/tool-activity.mjs';
 import { parseWorkspace, serializeWorkspace, WORKSPACE_KEY, WORKSPACE_KEY_V1, UI_DEFAULTS } from '../runtime/workspace.mjs';
 import { subagentFrameId, subagentFrameEvent, workerStateFromStatus, toolCallIdOf } from '../runtime/frame-model.mjs';
-import { openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels, getProviderStatus, saveProviderKey, dataRootStatus, recoverDataRoot, trustProviderEndpoint, listTrustedProviderEndpoints, validateProviderBaseUrl } from '../runtime/native.js';
+import { openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels, getProviderStatus, saveProviderKey, dataRootStatus, recoverDataRoot, trustProviderEndpoint, listTrustedProviderEndpoints, validateProviderBaseUrl, windowMinimize, windowMaximize, windowClose, windowStartDragging } from '../runtime/native.js';
 import { ensureSessionModel, executeSessionStart } from '../runtime/session-bootstrap.mjs';
 import { createFrameAdmission } from '../runtime/event-queue.mjs';
 import { Markdown } from '../runtime/markdown.jsx';
 import {
   Folder, FolderOpen, SquarePen, Search, Kanban, Globe, Terminal, Settings, Sun, Moon, Menu, X, Plus,
   ChevronRight, ChevronDown, ChevronUp, Columns2, Maximize2, Minimize2, ArrowLeft, ArrowRight, ArrowUp,
-  RotateCw, CirclePlay, Clock, Eye, CircleCheck, CircleX, Square, Circle, Unplug, FileText, Pencil, ListChecks, Users, FolderPlus
+  RotateCw, CirclePlay, Clock, Eye, CircleCheck, CircleX, Square, Circle, Unplug, FileText, Pencil, ListChecks, Users, FolderPlus, Minus, Trash2
 } from 'lucide-react';
 
 const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
@@ -38,10 +38,19 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
   --mesh:radial-gradient(900px 520px at 10% -8%,rgba(140,205,213,.22),transparent 62%),radial-gradient(760px 520px at 98% 0%,rgba(106,180,193,.17),transparent 60%),radial-gradient(900px 600px at 55% 118%,rgba(42,70,80,.6),transparent 62%);
   --r:8px; --r2:12px; --r3:18px;
   color-scheme:dark;
-  position:relative;height:100vh;height:100dvh;overflow:hidden;isolation:isolate;
+  position:relative;height:100vh;height:100dvh;overflow:hidden;isolation:isolate;display:flex;flex-direction:column;
   background:var(--mesh),var(--bg-app);color:var(--text);
   font:400 14px/1.5 var(--font-sans);-webkit-font-smoothing:antialiased;letter-spacing:0;}
-.cp[data-theme="light"]{--bg-app:#EDF6F8; --bg-panel:#FCFEFE; --bg-soft:#F0F8F9; --bg-hover:#E8F3F5; --bg-selected:#DCEFF2;
+.cp .titlebar{height:38px;flex:none;background:var(--accent-2);display:flex;align-items:center;justify-content:space-between;padding:0 14px;user-select:none;z-index:50;border-bottom:1px solid var(--glass-line);cursor:default;}
+.cp .titlebar-badge{display:inline-flex;align-items:center;gap:8px;background:#142830;color:#FFFFFF;font:700 13px/1 var(--font-sans);padding:4px 12px;border-radius:999px;box-shadow:0 2px 6px rgba(0,0,0,.22);letter-spacing:-.02em;}
+.cp .titlebar-logo{width:16px;height:16px;flex:none;}
+.cp .titlebar-logo path:first-child{fill:#FFFFFF;}
+.cp .titlebar-logo path:last-child{stroke:#FFFFFF;}
+.cp .titlebar-controls{display:flex;align-items:center;gap:8px;}
+.cp .titlebar-btn{width:22px;height:22px;border-radius:50%;background:#142830;color:#ECF5F6;border:0;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,transform .1s;}
+.cp .titlebar-btn:hover{background:#233E4A;}
+.cp .titlebar-btn.close:hover{background:#C94A58;color:#FFF;}
+.cp .titlebar-btn:active{transform:scale(.92);}
   --border:#DAE8EB; --border-strong:#BDD5DB;
   --text:#19333D; --text-2:#506F78; --text-3:#678790;
   --accent:#277986; --accent-2:#479DAA; --accent-soft:#E0F1F3; --accent-ink:#FFFFFF;
@@ -85,7 +94,7 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
 .cp .glass{background:var(--glass);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
 .cp .skip{position:absolute;left:8px;top:-60px;background:var(--accent);color:var(--accent-ink);padding:8px 12px;z-index:100;border-radius:var(--r)}
 .cp .skip:focus{top:8px}
-.cp .app{height:100%;display:grid;grid-template-columns:268px minmax(0,1fr);grid-template-rows:44px auto minmax(0,1fr)}
+.cp .app{flex:1;min-height:0;height:auto;display:grid;grid-template-columns:268px minmax(0,1fr);grid-template-rows:44px auto minmax(0,1fr);}
 .cp .topbar{grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--glass-line);min-width:0;z-index:5}
 .cp .brand{display:flex;align-items:center;gap:8px;font:800 16px/1 var(--font-sans);letter-spacing:-.03em;margin-right:6px;color:var(--text);border-radius:8px;padding:3px 4px}
 .cp .brand:hover{background:var(--glass-3)}
@@ -201,7 +210,16 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
 .cp .msg .body tbody tr:last-child td{border-bottom:0}
 .cp .msg .body hr.md-hr{border:0;border-top:1px solid var(--border);margin:.8em 0}
 .cp .msg .body a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
-.cp .msg .body li input[type=checkbox]{margin-right:.45em;vertical-align:middle;accent-color:var(--accent)}
+.cp .msg .body .md-math{overflow-x:auto;font-family:var(--font-mono);background:var(--glass-2);padding:10px 14px;border-radius:8px;border:1px solid var(--border);margin:.6em 0;font-size:.92em;color:var(--text)}
+.cp .msg .body .md-math-inline{font-family:var(--font-mono);background:var(--glass-2);padding:.1em .4em;border-radius:4px;border:1px solid var(--border);font-size:.9em;color:var(--text)}
+.cp .msg .body .md-details{margin:.6em 0;background:var(--glass-2);border:1px solid var(--border);border-radius:8px;padding:8px 12px}
+.cp .msg .body .md-details summary{cursor:pointer;font-weight:600;color:var(--text)}
+.cp .msg .body .md-details-body{margin-top:8px;padding-top:6px;border-top:1px solid var(--glass-line)}
+.cp .msg .body ul.task-list{list-style:none;padding-left:0;margin:.4em 0}
+.cp .msg .body li.task-list-item{list-style:none;display:flex;align-items:flex-start;gap:8px;margin:.25em 0}
+.cp .msg .body li.task-list-item input[type="checkbox"]{margin-top:4px}
+.cp .msg .body .diff-add{color:var(--ok);background:rgba(54,121,103,.16);display:block;margin:0 -12px;padding:0 12px}
+.cp .msg .body .diff-del{color:var(--bad);background:rgba(178,86,104,.16);display:block;margin:0 -12px;padding:0 12px}
 .cp .msg .body del{color:var(--text-3)}
 .cp .msg.user .body code{background:rgba(16,36,43,.07);border-color:rgba(16,36,43,.18);color:#10242B}
 .cp .msg.user .body pre{background:rgba(16,36,43,.06);border-color:rgba(16,36,43,.16);box-shadow:none;color:#183038}
@@ -460,9 +478,9 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
 @media (max-width:960px){
 .cp .app{grid-template-columns:minmax(0,1fr)}
 .cp .work{grid-column:1}
-.cp .rail{position:fixed;top:44px;bottom:0;left:0;width:min(300px,86vw);z-index:45;transform:translateX(-102%);box-shadow:var(--shadow);background:var(--bg-panel)}
+.cp .rail{position:fixed;top:82px;bottom:0;left:0;width:min(300px,86vw);z-index:45;transform:translateX(-102%);box-shadow:var(--shadow);background:var(--bg-panel)}
 .cp .rail.open{transform:none}
-.cp .scrim-rail.on{display:block;position:fixed;inset:44px 0 0 0;background:var(--scrim);z-index:44}
+.cp .scrim-rail.on{position:fixed;inset:82px 0 0 0;background:var(--scrim);z-index:44}
 .cp .only-narrow{display:inline-grid}
 .cp .crumb .lbl,
 .cp .tbtn .lbl,
@@ -1366,6 +1384,7 @@ export default function CanoPi() {
       <Ctx.Provider value={A}>
       <div className="cp" data-theme={theme}>
         <style>{CSS}</style>
+        <TitleBar />
         <div className="app" ref={appRef}>
           <Topbar />
           {dataRootIssue && (
@@ -1411,6 +1430,39 @@ function Toast({ msg }) {
   return <div className="toast" ref={ref}>{msg}</div>;
 }
 
+/* ================================================================ titlebar */
+function TitleBar() {
+  const onPointerDown = e => {
+    if (e.button === 0 && !e.target.closest('button')) {
+      windowStartDragging().catch(() => {});
+    }
+  };
+  const onDoubleClick = e => {
+    if (!e.target.closest('button')) {
+      windowMaximize().catch(() => {});
+    }
+  };
+  return (
+    <header className="titlebar" data-tauri-drag-region onPointerDown={onPointerDown} onDoubleClick={onDoubleClick}>
+      <div className="titlebar-badge" data-tauri-drag-region>
+        <Logo className="titlebar-logo" />
+        <span>canoPi</span>
+      </div>
+      <div className="titlebar-controls">
+        <button type="button" className="titlebar-btn" onClick={windowMinimize} aria-label="Minimize" title="Minimize">
+          <Minus size={12} />
+        </button>
+        <button type="button" className="titlebar-btn" onClick={windowMaximize} aria-label="Maximize" title="Maximize">
+          <Square size={10} />
+        </button>
+        <button type="button" className="titlebar-btn close" onClick={windowClose} aria-label="Close" title="Close">
+          <X size={12} />
+        </button>
+      </div>
+    </header>
+  );
+}
+
 /* ================================================================ topbar */
 function Topbar() {
   const A = useApp(); const { ss, db, view, conn } = A; const off = conn === 'disconnected';
@@ -1418,7 +1470,6 @@ function Topbar() {
   return (
     <header className="topbar glass" role="banner">
       <button className="ibtn only-narrow" aria-label="Open workspaces" aria-expanded={A.railOpen} onClick={() => A.setRailOpen(v => !v)}><Menu size={16} /></button>
-      <button className="brand" onClick={A.goHome} aria-label="canoPi, go to Home"><Logo /><span>canoPi</span></button>
       <div className="crumb">
         <span className="lbl">{proj ? proj.name : 'No project'}</span><span className="lbl" aria-hidden="true">/</span>
         <select aria-label="Session" value={ss ? ss.id : 'home'} onChange={e => (e.target.value === 'home' ? A.goHome() : A.openSession(e.target.value))}>
@@ -1975,17 +2026,18 @@ function ProviderSetupSection() {
   const [validation, setValidation] = useState(null);
   const [validating, setValidating] = useState(false);
   const [trustConfirm, setTrustConfirm] = useState(null);
-  const hasCustom = provider === 'custom' || provider === '9router';
+  const hasCustom = provider === 'custom';
   const isLoopback = Boolean(validation?.isLoopback);
   const configured = A.providerConfig?.providers || [];
   const validateUrl = async (url) => {
-    if (!url.trim()) { setValidation(null); return; }
+    const trimmed = url.trim();
+    if (!trimmed) { setValidation(null); return; }
     setValidating(true);
     try {
-      const result = await validateProviderBaseUrl(url.trim());
+      const result = await validateProviderBaseUrl(trimmed);
       setValidation(result);
     } catch (e) {
-      setValidation({ error: String(e.message || e), isNeverTrustable: true });
+      setValidation({ error: String(e.message || e), isNeverTrustable: false });
     }
     setValidating(false);
   };
@@ -2026,13 +2078,14 @@ function ProviderSetupSection() {
       provider,
       apiKey: key,
       baseUrl: baseUrl.trim() ? baseUrl.trim() : undefined,
-      api: provider === 'custom' ? transportApi : (provider === '9router' ? 'openai-completions' : undefined),
+      api: provider === 'custom' ? transportApi : undefined,
       modelId: modelId.trim() ? modelId.trim() : undefined
     });
     setSaving(false);
     if (ok) {
       setKeyInput('');
       setTrustConfirm(null);
+      await A.refreshProviderStatus();
     }
   };
   const onTrustConfirm = async () => {
@@ -2049,13 +2102,14 @@ function ProviderSetupSection() {
       provider: trustConfirm.provider,
       apiKey: trustConfirm.key,
       baseUrl: trustConfirm.url,
-      api: trustConfirm.provider === 'custom' ? trustConfirm.transportApi : (trustConfirm.provider === '9router' ? 'openai-completions' : undefined),
+      api: trustConfirm.provider === 'custom' ? trustConfirm.transportApi : undefined,
       modelId: trustConfirm.modelId
     });
     setSaving(false);
     if (ok) {
       setKeyInput('');
       setTrustConfirm(null);
+      await A.refreshProviderStatus();
     }
   };
   return (
@@ -2070,12 +2124,9 @@ function ProviderSetupSection() {
             <option value="google">Google Gemini</option>
             <option value="openrouter">OpenRouter</option>
             <option value="groq">Groq</option>
-            <option value="mistral">Mistral</option>
             <option value="xai">xAI (Grok)</option>
             <option value="deepseek">DeepSeek</option>
-            <option value="together">Together</option>
             <option value="custom">Custom (OpenAI-compatible)</option>
-            <option value="9router">9Router (optional local proxy)</option>
           </select>
         </div>
         {hasCustom && (
@@ -2084,7 +2135,7 @@ function ProviderSetupSection() {
             <input
               type="text"
               aria-label="Base URL"
-              placeholder={provider === '9router' ? 'http://127.0.0.1:9090/v1' : 'https://api.example.com/v1'}
+              placeholder="https://api.example.com/v1"
               value={baseUrl}
               onChange={e => setBaseUrl(e.target.value)}
               style={{ background: 'var(--glass-3)', border: '1px solid var(--glass-line)', borderRadius: 'var(--r)', padding: '5px 8px', fontSize: 13 }}
@@ -2093,6 +2144,7 @@ function ProviderSetupSection() {
             {isBlocked && <span style={{ fontSize: 11, color: 'var(--bad)', fontWeight: 600 }}>BLOCKED: metadata/link-local/multicast endpoints cannot be trusted</span>}
             {isPrivate && !trustConfirm && <span style={{ fontSize: 11, color: 'var(--warn)', fontWeight: 600 }}>Private endpoint requires explicit trust confirmation</span>}
             {isLoopback && <span style={{ fontSize: 11, color: 'var(--ok)' }}>Loopback endpoint (allowed without trust)</span>}
+            {validation?.error && !isBlocked && <span style={{ fontSize: 11, color: 'var(--warn)', fontWeight: 600 }}>{validation.error}</span>}
           </div>
         )}
         {!hasCustom && (
@@ -2110,6 +2162,7 @@ function ProviderSetupSection() {
             {isBlocked && <span style={{ fontSize: 11, color: 'var(--bad)', fontWeight: 600 }}>BLOCKED: metadata/link-local/multicast endpoints cannot be trusted</span>}
             {isPrivate && !trustConfirm && <span style={{ fontSize: 11, color: 'var(--warn)', fontWeight: 600 }}>Private endpoint requires explicit trust confirmation</span>}
             {isLoopback && <span style={{ fontSize: 11, color: 'var(--ok)' }}>Loopback endpoint (allowed without trust)</span>}
+            {validation?.error && !isBlocked && <span style={{ fontSize: 11, color: 'var(--warn)', fontWeight: 600 }}>{validation.error}</span>}
           </div>
         )}
         {!hasCustom && (

@@ -5,7 +5,7 @@
  * a downloaded OMP release, and enables providerless RPC mode bootstrap.
  * Fail closed if pinned files no longer match expected recipes.
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -35,7 +35,6 @@ export function patchFork(root) {
     }
     writeFileSync(mainTarget, mainOriginal.replace(mainExpected, mainPatched));
   }
-
   const repoRoot = resolve(import.meta.dirname, '..');
   const transportPatch = join(repoRoot, 'patches/omp/0002-canoPi-transport-endpoint-security.patch');
   if (!existsSync(transportPatch)) throw new Error(`canoPi transport patch missing: ${transportPatch}`);
@@ -43,12 +42,18 @@ export function patchFork(root) {
   if (!existsSync(transportTarget)) throw new Error(`Pinned upstream transport source missing: ${transportTarget}`);
   const transportSource = readFileSync(transportTarget, 'utf8');
   if (!transportSource.includes('CANOPI_STRICT_ENDPOINTS')) {
+    const patchContent = readFileSync(transportPatch, 'utf8');
+    const normalizedPatch = patchContent.replace(/\r\n/g, '\n');
+    const tmpPatch = join(root, '.tmp-canoPi-transport.patch');
+    writeFileSync(tmpPatch, normalizedPatch, 'utf8');
     try {
-      execFileSync('git', ['apply', '--check', '--recount', '--ignore-space-change', transportPatch], { cwd: root, stdio: 'pipe' });
-      execFileSync('git', ['apply', '--recount', '--ignore-space-change', transportPatch], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['apply', '--check', '--recount', tmpPatch], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['apply', '--recount', tmpPatch], { cwd: root, stdio: 'pipe' });
     } catch (error) {
       const detail = error.stderr?.toString() || error.message;
       throw new Error(`Cannot apply canoPi transport patch: ${detail}`);
+    } finally {
+      try { rmSync(tmpPatch, { force: true }); } catch {}
     }
   }
 

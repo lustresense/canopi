@@ -233,6 +233,7 @@ try {
         try {
             Must 'Install upstream dependencies (bun install; never links a global omp)' { bun install }
             Must 'Compile native engine components' { bun run build:native }
+            Must 'Generate embedded native addons archive' { $env:TARGET_PLATFORM = 'win32'; $env:TARGET_ARCH = 'x64'; bun --cwd=packages/natives run gen:native }
             Must 'Compile cnp engine from forked source' { bun --cwd="$upstream\packages\coding-agent" run build }
         } finally { Pop-Location }
         # Bun native Windows compile preserves the requested outfile literally.

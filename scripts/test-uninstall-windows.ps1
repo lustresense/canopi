@@ -25,7 +25,32 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
 function Get-TreeHash([string]$path) {
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     $lines = foreach ($f in (Get-ChildItem -LiteralPath $path -Recurse -File -Force)) {
-        '{0}|{1}' -f (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash, $f.FullName
+        $hash = $null
+        $retries = 3
+        $delayMs = 100
+        for ($i = 0; $i -lt $retries; $i++) {
+            try {
+                $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                break
+            } catch {
+                $err = $_
+                $isSharing = $err.CategoryInfo.Category -eq 'ReadError' -and $err.FullyQualifiedErrorId -like 'FileReadError*' -and $err.Exception.Message -like '*being used by another process*'
+                $isUnauth = $err.CategoryInfo.Category -eq 'ReadError' -and $err.Exception.Message -like '*Access*denied*'
+                if (-not ($isSharing -or $isUnauth)) { throw }
+                if ($i -eq $retries - 1) {
+                    # Deterministic fallback: path + stable metadata
+                    $fi = Get-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+                    $meta = "LOCKED|$($f.FullName)|$($fi.Length)|$($fi.LastWriteTimeUtc.ToString('o'))|$($fi.Attributes)"
+                    $sha = [Security.Cryptography.SHA256]::Create()
+                    $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($meta))) -replace '-', ''
+                    $sha.Dispose()
+                } else {
+                    Start-Sleep -Milliseconds $delayMs
+                    $delayMs *= 2
+                }
+            }
+        }
+        '{0}|{1}' -f $hash, $f.FullName
     }
     $joined = ($lines | Sort-Object) -join "`n"
     $sha = [Security.Cryptography.SHA256]::Create()

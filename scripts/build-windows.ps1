@@ -292,9 +292,9 @@ try {
     }
 
     # ---------------- desktop deps, tests, builds ---------------------------
-    Must 'Install desktop dependencies from lockfile (npm ci)' { npm ci --no-audit --no-fund }
-    Must 'Node runtime and source tests' { npm test }
-    Must 'React frontend production build' { npm run build }
+    Must 'Install desktop dependencies from lockfile (npm ci)' { npm.cmd ci --no-audit --no-fund }
+    Must 'Node runtime and source tests' { npm.cmd test }
+    Must 'React frontend production build' { npm.cmd run build }
     Push-Location 'src-tauri'
     try {
         Must 'Cargo lockfile in sync (cargo fetch --locked)' { cargo fetch --locked }
@@ -341,9 +341,9 @@ try {
 
     Must 'Package NSIS Windows installer (Tauri)' {
         if ($ReleaseMode -eq 'Signed' -and $env:TAURI_CONFIG_OVERRIDE_PATH) {
-            npm run package:windows -- --config $env:TAURI_CONFIG_OVERRIDE_PATH
+            npm.cmd run package:windows -- --config $env:TAURI_CONFIG_OVERRIDE_PATH
         } else {
-            npm run package:windows
+            npm.cmd run package:windows
         }
     }
 

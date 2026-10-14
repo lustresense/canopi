@@ -1,5 +1,5 @@
 diff --git a/packages/ai/src/utils/transport-fetch.ts b/packages/ai/src/utils/transport-fetch.ts
-index f7b6fac525..a063212468 100644
+index f7b6fac525..0f1bdd357f 100644
 --- a/packages/ai/src/utils/transport-fetch.ts
 +++ b/packages/ai/src/utils/transport-fetch.ts
 @@ -1,4 +1,6 @@
@@ -186,3 +186,10 @@ index f7b6fac525..a063212468 100644
  		if (!isRequestDebugEnabled()) return base(input, init);
  		const session = await createFetchRequestDebugSession(input, init);
  		return session.wrapResponse(await base(input, init));
+@@ -47,4 +208,4 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
+ export function withTransportFetch<T extends { fetch?: FetchImpl }>(model: Model<Api>, options: T): T {
+ 	const fetch = transportFetch(model, options.fetch);
+ 	return fetch === options.fetch ? options : { ...options, fetch };
+-}
++}
+\ No newline at end of file

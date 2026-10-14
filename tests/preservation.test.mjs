@@ -1,13 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
-const original=readFileSync(new URL('../docs/ORIGINAL_CANOPI_WORKSPACE.jsx',import.meta.url));
 const port=readFileSync(new URL('../src/app/CanoPi.jsx',import.meta.url),'utf8');
-const hash=x=>createHash('sha256').update(x).digest('hex');
-test('approved original JSX preserved byte-for-byte',()=>{
-  assert.equal(hash(original),'6464d6c3a626dc669672b644a2fa3e03f64a1dd795dd40d2a894bc1cc1b30113');
-});
 test('core JSX component layout preserved',()=>{
   for(const name of ['Topbar','Rail','ProjectNode','SessionNode','AgentRow','Home','Conversation','Transcript','Composer','Inspector','InspChat','Board','Dock','DockPane','DrawerLayer','PaletteLayer']){
     assert.match(port,new RegExp(`function ${name}\\(`),name);

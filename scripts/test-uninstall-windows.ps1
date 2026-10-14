@@ -38,12 +38,13 @@ function Get-TreeHash([string]$path) {
                 $isUnauth = $err.CategoryInfo.Category -eq 'ReadError' -and $err.Exception.Message -like '*Access*denied*'
                 if (-not ($isSharing -or $isUnauth)) { throw }
                 if ($i -eq $retries - 1) {
-                    # Deterministic fallback: path + stable metadata
-                    $fi = Get-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
-                    $meta = "LOCKED|$($f.FullName)|$($fi.Length)|$($fi.LastWriteTimeUtc.ToString('o'))|$($fi.Attributes)"
+                    # A live WebView process can mutate size/timestamps between
+                    # snapshots. Its unreadable content is opaque; preserve its
+                    # identity so the Keep check still detects removal/renames.
+                    $meta = "LOCKED|$($f.FullName)"
                     $sha = [Security.Cryptography.SHA256]::Create()
-                    $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($meta))) -replace '-', ''
-                    $sha.Dispose()
+                    try { $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($meta))) -replace '-', '' }
+                    finally { $sha.Dispose() }
                 } else {
                     Start-Sleep -Milliseconds $delayMs
                     $delayMs *= 2

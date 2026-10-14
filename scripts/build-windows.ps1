@@ -233,7 +233,7 @@ try {
         try {
             Must 'Install upstream dependencies (bun install; never links a global omp)' { bun install }
             Must 'Compile native engine components' { bun run build:native }
-            Must 'Compile cnp engine from forked source' { bun --cwd packages/coding-agent run build }
+            Must 'Compile cnp engine from forked source' { bun --cwd="$upstream\packages\coding-agent" run build }
         } finally { Pop-Location }
         # Bun native Windows compile preserves the requested outfile literally.
         # Prefer that source-built `cnp-engine` output; accept `.exe` if a Bun

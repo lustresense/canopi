@@ -1,5 +1,5 @@
 diff --git a/packages/ai/src/utils/transport-fetch.ts b/packages/ai/src/utils/transport-fetch.ts
-index f7b6fac525b8a9e54097109ddfe7dc03230f4345..a0632124688693c1792676e8faff58d849dd611b 100644
+index f7b6fac525..a063212468 100644
 --- a/packages/ai/src/utils/transport-fetch.ts
 +++ b/packages/ai/src/utils/transport-fetch.ts
 @@ -1,4 +1,6 @@

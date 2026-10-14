@@ -235,9 +235,18 @@ try {
             Must 'Compile native engine components' { bun run build:native }
             Must 'Compile cnp engine from forked source' { bun --cwd packages/coding-agent run build }
         } finally { Pop-Location }
-        $bin = Join-Path $upstream 'packages/coding-agent/dist/cnp-engine.exe'
+        # Bun native Windows compile preserves the requested outfile literally.
+        # Prefer that source-built `cnp-engine` output; accept `.exe` if a Bun
+        # release changes its native Windows suffix behavior.
+        $nativeEngine = Join-Path $upstream 'packages/coding-agent/dist/cnp-engine'
+        $exeEngine = Join-Path $upstream 'packages/coding-agent/dist/cnp-engine.exe'
+        $bin = if (Test-Path -LiteralPath $nativeEngine -PathType Leaf) { $nativeEngine } else { $exeEngine }
         $engineSource = 'source-built-in-pipeline'
-        Must 'Stage validated engine location exists' { if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) { throw "Source-built cnp-engine.exe missing: $bin" } }
+        Must 'Stage validated engine location exists' {
+            if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
+                throw "Source-built cnp engine missing (tried $nativeEngine and $exeEngine)"
+            }
+        }
         Must 'Generate engine provenance manifest' { python scripts/verify-engine-provenance.py $upstream $bin 'ENGINE-PROVENANCE.json' }
     }
 

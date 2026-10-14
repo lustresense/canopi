@@ -44,8 +44,8 @@ export function patchFork(root) {
   const transportSource = readFileSync(transportTarget, 'utf8');
   if (!transportSource.includes('CANOPI_STRICT_ENDPOINTS')) {
     try {
-      execFileSync('git', ['apply', '--check', '--recount', transportPatch], { cwd: root, stdio: 'pipe' });
-      execFileSync('git', ['apply', '--recount', transportPatch], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['apply', '--check', '--recount', '--ignore-space-change', transportPatch], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['apply', '--recount', '--ignore-space-change', transportPatch], { cwd: root, stdio: 'pipe' });
     } catch (error) {
       const detail = error.stderr?.toString() || error.message;
       throw new Error(`Cannot apply canoPi transport patch: ${detail}`);

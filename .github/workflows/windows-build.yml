@@ -17,7 +17,6 @@ permissions:
   contents: read
 
 env:
-  # Expected certificate values from secrets (independent of runtime import)
   CANOPI_CERT_THUMBPRINT: ${{ secrets.CANOPI_CERT_THUMBPRINT }}
   CANOPI_CERT_SUBJECT: ${{ secrets.CANOPI_CERT_SUBJECT }}
   CANOPI_CERT_DIGEST_ALGORITHM: ${{ secrets.CANOPI_CERT_DIGEST_ALGORITHM }}
@@ -124,7 +123,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          bun --cwd packages/coding-agent run build
+          bun run scripts/build-binary.ts
       - name: Validate built engine, provenance, and RPC handshake
         shell: pwsh
         run: |
@@ -162,7 +161,6 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
-      # ---------------- SIGNED MODE: Sign engine BEFORE packaging ----------------
       - name: Sign engine binary (Signed mode only)
         if: env.RELEASE_MODE == 'Signed'
         env:
@@ -178,7 +176,6 @@ jobs:
           $signScript = (Resolve-Path "scripts/sign-engine.ps1").Path
           & $signScript -BinaryPath $stagedEngine -Thumbprint $env:CANOPI_CERT_THUMBPRINT -Subject $env:CANOPI_CERT_SUBJECT -TimestampUrl $env:CANOPI_CERT_TIMESTAMP_URL
 
-      # ---------------- PACKAGE ----------------
       - name: Build NSIS Windows installer (Tauri)
         env:
           TAURI_SIGNING_CERTIFICATE_THUMBPRINT: ${{ secrets.CANOPI_CERT_THUMBPRINT }}
@@ -190,7 +187,6 @@ jobs:
           $releaseMode = "$env:RELEASE_MODE"
           if ($releaseMode -eq 'Signed') {
             if (-not "${{ secrets.CANOPI_CERT_THUMBPRINT }}") { throw 'ReleaseMode=Signed requires CANOPI_CERT_THUMBPRINT secret' }
-            # Generate Tauri signing config override
             $signScript = (Resolve-Path "scripts/sign-engine.ps1").Path
             $configObj = [ordered]@{
               bundle = @{
@@ -220,7 +216,6 @@ jobs:
             npm run package:windows
           }
 
-      # ---------------- VERIFY ----------------
       - name: Verify Authenticode signatures on all shipped executables
         if: env.RELEASE_MODE == 'Signed'
         env:
@@ -332,7 +327,6 @@ jobs:
           if (-not (Test-Path -LiteralPath $app -PathType Leaf)) { throw "Installed canoPi.exe not found at $app" }
           $engine = Join-Path $instDir 'engine\cnp-engine.exe'
           if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw "Installed engine is absent: $engine" }
-          # Avoid falsely claiming interactive user-session E2E on a headless CI runner.
           $uninstaller = Join-Path $instDir 'uninstall.exe'
           if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Uninstaller not found in install directory' }
           $uninstallKeys = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like '*canoPi*' })

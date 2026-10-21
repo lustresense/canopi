@@ -87,3 +87,8 @@ export async function dataRootStatus() {
 export async function recoverDataRoot() {
   requireDesktop(); return invoke('recover_data_root');
 }
+
+/** Open an external http(s) URL with the OS handler (OAuth sign-in links). */
+export async function openExternalUrl(url) {
+  requireDesktop(); return invoke('open_external_url', { url });
+}

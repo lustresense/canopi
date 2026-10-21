@@ -10,8 +10,9 @@ import { projectAssistantFrame } from '../runtime/live-projection.mjs';
 import { projectToolActivity, upsertActivity, retainRows, mergeTranscriptSnapshot } from '../runtime/tool-activity.mjs';
 import { parseWorkspace, serializeWorkspace, WORKSPACE_KEY, WORKSPACE_KEY_V1, UI_DEFAULTS } from '../runtime/workspace.mjs';
 import { subagentFrameId, subagentFrameEvent, workerStateFromStatus, toolCallIdOf } from '../runtime/frame-model.mjs';
-import { openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels, getProviderStatus, saveProviderKey, dataRootStatus, recoverDataRoot, trustProviderEndpoint, listTrustedProviderEndpoints, validateProviderBaseUrl, windowMinimize, windowMaximize, windowClose, windowStartDragging } from '../runtime/native.js';
+import { openAgentBrowser, closeAgentBrowser, navigateAgentBrowser, reloadAgentBrowser, agentBrowserState, screenshotAgentBrowser, previewOmpModels, importOmpModels, getProviderStatus, saveProviderKey, dataRootStatus, recoverDataRoot, trustProviderEndpoint, listTrustedProviderEndpoints, validateProviderBaseUrl, windowMinimize, windowMaximize, windowClose, windowStartDragging, openExternalUrl } from '../runtime/native.js';
 import { ensureSessionModel, executeSessionStart } from '../runtime/session-bootstrap.mjs';
+import { fetchLoginProviders, runProviderLogin } from '../runtime/provider-login.mjs';
 import { createFrameAdmission } from '../runtime/event-queue.mjs';
 import { Markdown } from '../runtime/markdown.jsx';
 import {
@@ -799,10 +800,22 @@ export default function CanoPi() {
     runtimeInfo().then(x => { setEngine(x); setConn(x.available ? 'idle' : 'disconnected'); }).catch(e => { setEngine({available:false,error:String(e)}); setConn('disconnected'); });
     refreshProviderStatus();
     checkDataRoot();
-  }, [refreshProviderStatus, checkDataRoot]);
+    void refreshLoginProviders();
+  }, [refreshProviderStatus, checkDataRoot, refreshLoginProviders]);
 
   const appRef = useRef(null), workRef = useRef(null), scrollRef = useRef({}), busyRef = useRef({}), logic = useRef({}), pendingSync = useRef(new Map()), admissionRef = useRef(null);
   const uiRef = useRef({}); uiRef.current = { sid, view, insp, inspTab, conn, selTask };
+  /* Native OAuth login: providers reported by the engine plus their auth state. */
+  const [loginProviders, setLoginProviders] = useState([]);
+  const [loginBusy, setLoginBusy] = useState(null);
+  const refreshLoginProviders = useCallback(async (sidx) => {
+    const cur = sidx || uiRef.current.sid;
+    if (!cur) return;
+    try {
+      const list = await fetchLoginProviders(cmd => sendRpc(cur, cmd));
+      setLoginProviders(list);
+    } catch { /* engine offline, or an OMP build without native login RPC */ }
+  }, []);
 
   const ss = sid && db.sessions[sid] ? db.sessions[sid] : null;
   const availableModels = ss ? ss.models : [];
@@ -1093,6 +1106,24 @@ export default function CanoPi() {
       if (levels) mutate(x => { const s = x.sessions[sidx]; if (s) s.thinkingLevels = levels; });
     } catch { /* Older engines may not expose the catalog; the select keeps the active level only. */ }
   };
+  /* Native OAuth sign-in: the engine emits open_url (browser) then an input
+     dialog for the redirect URL through the existing extension UI router.
+     On success the login badge and the model catalog refresh. */
+  const connectProviderLogin = async (providerId) => {
+    const cur = uiRef.current.sid || sid;
+    if (!cur) { toast('Open a session first: native sign-in needs a running canoPi engine.'); return; }
+    setLoginBusy(providerId);
+    try {
+      await runProviderLogin({
+        providerId,
+        sendRpc: cmd => sendRpc(cur, cmd),
+        openUrl: url => openExternalUrl(url),
+        refreshStatus: () => refreshLoginProviders(cur),
+        refreshModels: () => refreshModels(cur),
+        toast,
+      });
+    } finally { setLoginBusy(null); }
+  };
   /* Post-handshake opt-ins, identical for every session: subagent frames and
      OMP ask/confirm dialogs (the real approval path) must reach this UI. */
   const bootSession = async sidx => {
@@ -1118,6 +1149,7 @@ export default function CanoPi() {
     });
     await refreshCommands(sidx);
     void refreshWorkers(sidx);
+    void refreshLoginProviders(sidx);
     return res.ok ? res.models : [];
   };
   const refreshWorkerMessages = async (sidx, aid) => {
@@ -1199,8 +1231,12 @@ export default function CanoPi() {
       case 'setWidget': mutate(d => { const s = d.sessions[sidx]; if (!s) return; const w = { ...(s.extWidgets || {}) }; if (Array.isArray(frame.widgetLines)) w[String(frame.widgetKey)] = { lines: frame.widgetLines.map(String), placement: frame.widgetPlacement || 'belowEditor' }; else delete w[String(frame.widgetKey)]; s.extWidgets = w; }); return true;
       case 'open_url': {
         const url = String(frame.launchUrl || frame.url || '');
-        if (url && navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(url).then(() => toast('Sign-in link copied. Finish sign-in in your browser.')).catch(() => toast('Sign-in link: ' + url));
+        if (url) {
+          openExternalUrl(url).then(() => toast('Sign-in link opened in your browser.')).catch(() => {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(url).then(() => toast('Sign-in link copied. Finish sign-in in your browser.')).catch(() => toast('Sign-in link: ' + url));
+            } else toast('Sign-in link: ' + url);
+          });
         } else toast('Sign-in link: ' + url);
         return true;
       }
@@ -1375,6 +1411,7 @@ export default function CanoPi() {
     gsap, db, sid, ss, view, insp, inspTab, conn, engine, availableModels, runtimeCommands, liveModel, thinkingLevels, thinkingLevel, runtimeDialog, changeModel, setThinking, answerDialog, importProviderDefinitions, dock, dragging, phase, group, selTask, colTab, drafts, theme, railOpen, collapsed, homeProject, stale,
     drawer, palette, confirmS, dockTabs, dockHeight, dockMax, workRef, scrollRef, eff,
     providerConfig, refreshProviderStatus, saveApiKey, dataRootIssue, handleRecoverDataRoot,
+    loginProviders, refreshLoginProviders, connectProviderLogin, loginBusy,
     setDraft, setPhase, setGroup, setSelTask, setColTab, setDock, setDragging, setRailOpen, setCollapsed, setHomeProject, setDrawer, setPalette, setConn, setConfirmS,
     toast, confirm, mutate, updateSessionLight, pushMsg, patchMsg, addTrace, setAgent, setTodos, goHome, openSession, setView, openInspector, closeInspector, focusTrace, toggleTheme, newSession: goHome, openFolder, startSession,
     mainReply, stopMain, steer, stopWorker, disconnect, reconnect, setStale,
@@ -1618,7 +1655,7 @@ function Dashboard() {
       <div className="board-grid">
         <section className="board-card"><h2>Engine</h2><p role="status">{conn === 'connected' ? 'Connected' : conn === 'idle' ? 'Installed, no active session' : 'Disconnected'}</p><small>{engine.error || 'Runtime status from canoPi bridge'}</small></section>
         <section className="board-card"><h2>Active model</h2><p>{liveModel ? `${liveModel.provider}/${liveModel.modelId}` : 'No active model reported'}</p><small>{availableModels.length} models reported by active OMP session</small></section>
-        <section className="board-card"><h2>Providers</h2>{providerConfig.providers.length ? <ul>{providerConfig.providers.map((p, i) => <li key={i}>{p.name || p.provider || 'Provider'}{p.hasKey ? ' · credential configured' : ' · no credential reported'}</li>)}</ul> : <p>No configured providers reported.</p>}</section>
+        <section className="board-card"><h2>Providers</h2>{providerConfig.providers.length ? <ul>{providerConfig.providers.map((p, i) => <li key={i}>{p.name || p.provider || 'Provider'}{p.hasKey ? ' · credential configured' : ' · no credential reported'}</li>)}</ul> : <p>No configured providers reported.</p>}{A.loginProviders.length ? <small>{A.loginProviders.filter(p => p.authenticated).length} of {A.loginProviders.length} providers connected via native sign-in</small> : null}</section>
         <section className="board-card"><h2>Session tasks</h2><p>{ss ? `${tasks.length} tasks · ${counts.in_progress || 0} in progress · ${counts.completed || 0} completed` : 'No active session'}</p><small>{ss ? `Scope: ${ss.name} (active session only)` : 'Open a session to view its OMP task state'}</small></section>
         <section className="board-card"><h2>Request telemetry</h2><p>Unavailable</p><small>canoPi/OMP does not currently expose request-level provider, latency, or limit telemetry here.</small></section>
       </div>
@@ -2154,6 +2191,7 @@ function ProviderSetupSection() {
             <option value="together">Together AI</option>
             <option value="xai">xAI (Grok)</option>
             <option value="deepseek">DeepSeek</option>
+            <option value="canopi-router">Smart Router</option>
             <option value="custom">Custom (OpenAI-compatible)</option>
           </select>
         </div>
@@ -2289,10 +2327,28 @@ function ProviderSetupSection() {
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {configured.map(p => (
               <span key={p.id} className="chip" style={{ fontSize: 11, borderColor: 'var(--accent)' }}>
-                {p.id}: {p.hasKey ? 'Key saved' : 'No key'}{p.api ? ` (${p.api})` : ''}
+                {p.id}: {p.hasKey ? 'Key saved' : 'No key'}{p.api ? ` (${p.api})` : ''}{(A.loginProviders || []).some(l => l.id === p.id && l.authenticated) ? ' · Connected' : ''}
               </span>
             ))}
           </div>
+        </div>
+      )}
+      {(A.loginProviders || []).length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <small style={{ color: 'var(--text-3)', display: 'block', marginBottom: 4 }}>Native sign-in (browser OAuth):</small>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            {A.loginProviders.map(p => (
+              <span key={'login-' + p.id} className="chip" style={{ fontSize: 11, borderColor: p.authenticated ? 'var(--accent)' : 'var(--border)' }}>
+                {p.name}: {p.authenticated ? 'Connected' : 'No connections'}
+                <button className="btn sm" style={{ marginLeft: 6 }} disabled={!p.available || A.loginBusy === p.id} onClick={() => A.connectProviderLogin(p.id)}>
+                  {A.loginBusy === p.id ? 'Waiting for browser…' : (p.authenticated ? 'Reconnect' : 'Connect')}
+                </button>
+              </span>
+            ))}
+          </div>
+          <small style={{ color: 'var(--text-3)', display: 'block', marginTop: 4 }}>
+            Opens your default browser. When asked, paste the redirect URL back into the canoPi dialog.
+          </small>
         </div>
       )}
     </div>

@@ -80,8 +80,18 @@ fn allowed_command(cmd: &Value) -> Result<&str, String> {
         "get_subagent_messages", "set_subagent_subscription", "steer_subagent", "cancel_subagent",
         "get_available_commands", "get_messages", "get_messages_page", "get_entries", "get_tree",
         "get_available_thinking_levels", "set_thinking_level", "set_ask_dialog", "set_event_filter",
+        "get_login_providers", "login",
     ];
     if !ALLOWED.contains(&ty) { return Err(format!("RPC command not allowlisted: {ty}")); }
+    // Native OAuth login: only a narrow providerId is forwarded to the engine.
+    if matches!(ty, "login" | "get_login_providers") {
+        if ty == "login" {
+            let provider_id = cmd.get("providerId").and_then(Value::as_str).ok_or("RPC providerId missing")?;
+            if provider_id.is_empty() || provider_id.len() > 64 || !provider_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                return Err("RPC providerId invalid (expected [A-Za-z0-9_-], <=64 chars)".into());
+            }
+        }
+    }
     if matches!(ty, "prompt" | "steer" | "follow_up" | "steer_subagent") {
         let msg = cmd.get("message").and_then(Value::as_str).ok_or("RPC message missing")?;
         if msg.trim().is_empty() || msg.len() > 262_144 { return Err("RPC message empty or too large".into()); }
@@ -434,6 +444,8 @@ async fn request(session: &Arc<Session>, supervisor: &Supervisor, mut cmd: Value
         "prompt" => 35,
         // Model discovery waits for background provider scans (pinned docs/rpc.md).
         "get_available_models" => 60,
+        // Native OAuth login waits on a browser round-trip (matches OMP wire timeout).
+        "login" => 600,
         _ => 15,
     };
     match timeout(Duration::from_secs(wait), rx).await {
@@ -802,11 +814,47 @@ fn apply_native_titlebar_colors(window: &tauri::WebviewWindow) {
 }
 
 
+/// Validate an http(s) URL that the host may hand to the OS opener.
+/// Rejects anything that is not a plain http(s) URL with no whitespace,
+/// control characters, or embedded quotes (defence-in-depth for the OAuth
+/// callback/authorize links produced by the engine).
+fn valid_external_url(url: &str) -> bool {
+    if url.is_empty() || url.len() > 2048 { return false; }
+    if !url.starts_with("http://") && !url.starts_with("https://") { return false; }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'' || c == '`') { return false; }
+    true
+}
+
+/// Open an external http(s) URL with the platform handler, spawning WITHOUT a
+/// shell so OAuth URLs carrying `&`/`?`/`=` are passed verbatim (never via
+/// `cmd /C start`, which re-splits on `&` and allows argument injection).
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !valid_external_url(&url) { return Err("Invalid external URL (http/https only, no whitespace)".into()); }
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("rundll32.exe");
+    #[cfg(target_os = "windows")]
+    { cmd.arg("url.dll,FileProtocolHandler").arg(&url); }
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "macos")]
+    { cmd.arg(&url); }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { cmd.arg(&url); }
+    let spawned = cmd.spawn().map_err(|e| format!("Failed to open external URL: {e}"))?;
+    // Detach: do not leave a zombie waiting on the opener's exit status.
+    std::mem::drop(spawned);
+    Ok(())
+}
+
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Supervisor::default())
-        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, window_minimize, window_maximize, window_close, window_start_dragging, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models, provider_save_key, provider_status, provider_trust_endpoint, provider_revoke_endpoint_trust, provider_list_trusted_endpoints, provider_validate_base_url, data_root_status, recover_data_root])
+        .invoke_handler(tauri::generate_handler![runtime_info, rpc_start, rpc_send, rpc_ui_reply, rpc_stop, window_minimize, window_maximize, window_close, window_start_dragging, native::browser_open, native::browser_close, native::browser_navigate, native::browser_reload, native::browser_state, native::browser_read, native::browser_act, native::browser_screenshot, native::browser_clear_data, provider_import_preview, provider_import_models, provider_save_key, provider_status, provider_trust_endpoint, provider_revoke_endpoint_trust, provider_list_trusted_endpoints, provider_validate_base_url, data_root_status, recover_data_root, open_external_url])
         .setup(|app| {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
@@ -851,6 +899,45 @@ mod tests {
         assert!(allowed_command(&json!({"type":"prompt","message":"x".repeat(262_145)})).is_err());
         assert!(allowed_command(&json!({"type":"negotiate_protocol","protocolVersion":1})).is_err());
         assert!(!valid_key("../escape"));
+    }
+
+    #[test]
+    fn native_login_allowlist_and_provider_id_validation() {
+        // get_login_providers needs no arguments.
+        assert!(allowed_command(&json!({"type":"get_login_providers"})).is_ok());
+        // login requires a narrow providerId.
+        assert!(allowed_command(&json!({"type":"login","providerId":"google-antigravity"})).is_ok());
+        assert!(allowed_command(&json!({"type":"login","providerId":"openai-codex"})).is_ok());
+        // Missing / wrong-type / oversized / unsafe providerId are rejected.
+        assert!(allowed_command(&json!({"type":"login"})).is_err());
+        assert!(allowed_command(&json!({"type":"login","providerId":42})).is_err());
+        assert!(allowed_command(&json!({"type":"login","providerId":""})).is_err());
+        assert!(allowed_command(&json!({"type":"login","providerId":"../escape"})).is_err());
+        assert!(allowed_command(&json!({"type":"login","providerId":"a b"})).is_err());
+        assert!(allowed_command(&json!({"type":"login","providerId":"rm -rf"})).is_err());
+        assert!(allowed_command(&json!({"type":"login","providerId":"x".repeat(65)})).is_err());
+        // Still closed to non-login commands.
+        assert!(allowed_command(&json!({"type":"bash","command":"del *"})).is_err());
+    }
+
+    #[test]
+    fn external_url_validation_is_http_only_and_injection_safe() {
+        assert!(valid_external_url("https://antigravity.google/auth?client_id=abc&scope=openid"));
+        assert!(valid_external_url("http://localhost:54545/callback?code=xyz"));
+        // Non-http schemes are rejected.
+        assert!(!valid_external_url("ftp://example.com/x"));
+        assert!(!valid_external_url("file:///etc/passwd"));
+        assert!(!valid_external_url("javascript:alert(1)"));
+        assert!(!valid_external_url("rundll32.exe,url.dll"));
+        // Whitespace / control / quote characters are rejected (no shell, no arg split).
+        assert!(!valid_external_url("https://a.com/x y"));
+        assert!(!valid_external_url("https://a.com/x\ny"));
+        assert!(!valid_external_url("https://a.com/x\tt"));
+        assert!(!valid_external_url("https://a.com/\u{0}x"));
+        assert!(!valid_external_url("https://a.com/\"quoted\""));
+        // Empty and over-length are rejected.
+        assert!(!valid_external_url(""));
+        assert!(!valid_external_url(&format!("https://a.com/{}", "x".repeat(5000))));
     }
     #[test]
     fn schema_fields_follow_pinned_rpc_docs() {
@@ -1435,6 +1522,7 @@ const BUILTIN_PROVIDERS: &[&str] = &[
     "xai",
     "deepseek",
     "together",
+    "canopi-router",
 ];
 
 const ALLOWED_APIS: &[&str] = &[

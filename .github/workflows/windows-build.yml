@@ -122,7 +122,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          bun run _upstream/oh-my-pi/scripts/build-binary.ts
+          bun run _upstream/oh-my-pi/packages/coding-agent/scripts/build-binary.ts
       - name: Validate built engine, provenance, and RPC handshake
         shell: pwsh
         run: |

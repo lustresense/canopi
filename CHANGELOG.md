@@ -1,0 +1,32 @@
+# Changelog
+
+All notable changes to canoPi Desktop will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- CHANGELOG.md initialized
+
+---
+
+## [0.3.0] - 2026-10-14
+
+### Added
+- Vite + Tauri v2 desktop app (canopi-desktop)
+- Release build pipeline with GitHub Actions
+- Windows build script (BUILD-WINDOWS.cmd)
+- Build & E2E test report
+- Engine provenance tracking (ENGINE-PROVENANCE.json)
+- Test results documentation
+
+### Technical
+- Package: canopi-desktop (Tauri + Vite)
+- Git initialized with commit history
+- Node.js dependencies locked
+
+### Known Limitations
+- CHANGELOG created retroactively
+- No CI/CD for automated releases yet

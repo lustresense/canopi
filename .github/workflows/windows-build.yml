@@ -11,7 +11,7 @@ on:
           - Development
           - Signed
   push:
-    branches: [main]
+    branches: [dev, master]
 
 permissions:
   contents: read

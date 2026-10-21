@@ -199,3 +199,28 @@ canoPi Desktop is released under the [MIT License](LICENSE).
 - **Foundational Architecture (Pi Agent / `pi-mono`)** — Copyright (c) 2025 Mario Zechner. MIT License.
 
 Full third-party notices are referenced in `src-tauri/resources/licenses/`; the Windows source-build workflow injects the exact pinned upstream notices (`LICENSE-OMP.txt`, `THIRD-PARTY-NOTICES-OMP.txt` and related files) there before Tauri compilation.
+
+---
+
+## Documentation
+
+| File | Purpose |
+|------|---------|
+| [PRD.md](./PRD.md) | Product Requirements Document v0.3 |
+| [SPEC.md](./SPEC.md) | Spec template for new features |
+| [CHANGELOG.md](./CHANGELOG.md) | Version history (Keep a Changelog) |
+| [BUILD_AND_E2E_REPORT.md](./BUILD_AND_E2E_REPORT.md) | Build pipeline & E2E test details |
+| [CANOPI_V0_3_BUILD_REPORT.md](./CANOPI_V0_3_BUILD_REPORT.md) | v0.3 build specifics |
+| [CANOPI_V0_3_TEST_RESULTS.txt](./CANOPI_V0_3_TEST_RESULTS.txt) | Test results |
+| [ENGINE-PROVENANCE.json](./ENGINE-PROVENANCE.json) | Engine provenance tracking |
+
+---
+
+## Development Workflow
+
+1. **Pick task** dari PRD section 5 (P0 → P1 → P2 → P3)
+2. **Create SPEC** dari template `SPEC.md` → `SPEC-<feature>.md`
+3. **Implement** dengan TDD (Rust: `cargo test`, Frontend: Vitest)
+4. **Validate**: `npm run lint`, `npm run typecheck`, `cargo clippy`, `npm test`, `npm run build`
+5. **Commit** dengan conventional commits
+6. **Push** → GitHub Actions → Build matrix (Win/Linux/macOS) → Release

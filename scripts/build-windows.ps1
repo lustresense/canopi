@@ -569,12 +569,12 @@ try {
                 nsis = "bundled with @tauri-apps/cli $cliVer"
             }
             signing = [ordered]@{
-                codeSigned = [bool]$expectedThumbprint
-                thumbprint = if ($expectedThumbprint) { $expectedThumbprint } else { $null }
+                codeSigned = [bool]$isSignedBuild
+                thumbprint = if ($isSignedBuild) { $expectedThumbprint } else { $null }
                 digestAlgorithm = 'sha256'
                 timestampUrl = 'http://timestamp.sectigo.com'
                 tsp = $true
-                note = if ($expectedThumbprint) { 'Authenticode-signed with RFC3161 timestamp; all shipped executables verified against expected thumbprint.' } else { 'Unsigned build. SmartScreen warnings are expected; no signature or reputation is claimed.' }
+                note = if ($isSignedBuild) { 'Authenticode-signed with RFC3161 timestamp; all shipped executables verified against expected thumbprint.' } else { 'Unsigned build. SmartScreen warnings are expected; no signature or reputation is claimed.' }
             }
             tests = @($script:Steps | Where-Object { $_.name -match 'test|smoke|verif|Node runtime|Compile and test|lifecycle|Uninstall data' } |
                 ForEach-Object { [ordered]@{ name = $_.name; status = $_.status } })

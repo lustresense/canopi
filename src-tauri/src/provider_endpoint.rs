@@ -358,20 +358,22 @@ fn is_trusted_endpoint(scheme: &str, host: &str, port: u16) -> bool {
 
 /// Trust a private endpoint (persist fingerprint).
 pub fn trust_endpoint(scheme: &str, host: &str, port: u16, note: Option<String>, profile_dir: &Path) -> Result<(), String> {
-    let mut reg = get_trusted_registry().ok_or("Trusted registry not initialized")?;
+    let mut registry = TRUSTED_REGISTRY.lock();
+    let mut reg = registry.clone().ok_or("Trusted registry not initialized")?;
     reg.add(scheme, host, port, note);
     reg.save(profile_dir)?;
-    update_global_registry(&reg);
+    *registry = Some(reg);
     Ok(())
 }
 
 /// Revoke trust for an endpoint.
 pub fn revoke_endpoint_trust(scheme: &str, host: &str, port: u16, profile_dir: &Path) -> Result<bool, String> {
-    let mut reg = get_trusted_registry().ok_or("Trusted registry not initialized")?;
+    let mut registry = TRUSTED_REGISTRY.lock();
+    let mut reg = registry.clone().ok_or("Trusted registry not initialized")?;
     let removed = reg.remove(scheme, host, port);
     if removed {
         reg.save(profile_dir)?;
-        update_global_registry(&reg);
+        *registry = Some(reg);
     }
     Ok(removed)
 }
@@ -867,6 +869,37 @@ mod tests {
 
         let list = loaded.list();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_concurrent_trust_updates_preserve_all_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        init_trusted_registry(dir.path()).unwrap();
+        trust_endpoint("https", "revoked.example.com", 8443, None, dir.path()).unwrap();
+
+        let mut threads: Vec<_> = (0..8)
+            .map(|index| {
+                let profile_dir = dir.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let host = format!("internal-{index}.example.com");
+                    trust_endpoint("https", &host, 8443, None, &profile_dir).unwrap();
+                })
+            })
+            .collect();
+        let profile_dir = dir.path().to_path_buf();
+        threads.push(std::thread::spawn(move || {
+            assert!(revoke_endpoint_trust("https", "revoked.example.com", 8443, &profile_dir).unwrap());
+        }));
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let persisted = TrustedEndpointRegistry::load(dir.path()).unwrap();
+        assert_eq!(persisted.list().len(), 8);
+        assert!(!persisted.is_trusted("https", "revoked.example.com", 8443));
+        for index in 0..8 {
+            assert!(persisted.is_trusted("https", &format!("internal-{index}.example.com"), 8443));
+        }
     }
 
     #[test]

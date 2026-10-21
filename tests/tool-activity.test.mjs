@@ -25,6 +25,23 @@ test('retainRows bounds an all-running overflow to cap, newest rows win', () => 
   assert.deepEqual(kept.map(r => r.id), ['run2', 'run3', 'run4', 'run5', 'run6']);
 });
 
+test('retainRows preserves all running rows before newest completed rows', () => {
+  const rows = [
+    row('old-complete', 'ok'),
+    row('running-1', 'running'),
+    row('new-complete-1', 'ok'),
+    row('running-2', 'running'),
+    row('new-complete-2', 'error'),
+    row('new-complete-3', 'ok'),
+  ];
+  const kept = retainRows(rows, 4);
+  assert.deepEqual(kept.map(r => r.id), ['running-1', 'running-2', 'new-complete-2', 'new-complete-3']);
+});
+
+test('retainRows returns no rows when cap is zero', () => {
+  assert.deepEqual(retainRows([row('running', 'running')], 0), []);
+});
+
 test('retainRows leaves lists within cap untouched', () => {
   const rows = [row('a', 'ok'), row('b', 'running')];
   assert.equal(retainRows(rows, 5), rows);

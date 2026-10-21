@@ -16,7 +16,9 @@ import React, { useMemo } from 'react';
 /* Order matters: code spans, inline math ($...$), then links, bare URLs, strikethrough,
  * then ** / __ bold, then * / _ italic. `_italic_` refuses intra-word
  * matches so snake_case identifiers survive. */
-const INLINE_RE = /(`+)([\s\S]*?)\1|\$([^\$\n]+?)\$|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|(https?:\/\/[^\s<]+)|~~([^~\n]+)~~|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\n]+?)\*|(?<![\w])_([^_\n]+?)_(?![\w])/g;
+const INLINE_RE = /(`+)([\s\S]*?)\1|\$([^\$\n]+?)\$(?!\d)|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|(https?:\/\/[^\s<]+)|~~([^~\n]+)~~|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\n]+?)\*|(?<![\w])_([^_\n]+?)_(?![\w])/g;
+/* A dollar followed by digits is commonly currency; don't consume the next
+ * amount's dollar as an inline-math closing delimiter. */
 
 /* Only http(s), mailto and relative paths may reach href. Anything with
  * another scheme (javascript:, data:, vbscript:, …) is rejected outright;

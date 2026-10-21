@@ -2083,11 +2083,26 @@ async fn provider_save_key(
     if let Some(ref url) = clean_base_url {
         updates.insert(serde_yaml::Value::String("baseUrl".to_string()), serde_yaml::Value::String(url.clone()));
     }
-    if let Some(ref api_val) = api_kind {
-        updates.insert(serde_yaml::Value::String("api".to_string()), serde_yaml::Value::String(api_val.clone()));
-    }
     if let Some(ref mid) = clean_model_id {
-        updates.insert(serde_yaml::Value::String("modelId".to_string()), serde_yaml::Value::String(mid.clone()));
+        let mut model_map = serde_yaml::Mapping::new();
+        model_map.insert(
+            serde_yaml::Value::String("id".to_string()),
+            serde_yaml::Value::String(mid.clone()),
+        );
+        model_map.insert(
+            serde_yaml::Value::String("name".to_string()),
+            serde_yaml::Value::String(mid.clone()),
+        );
+        if let Some(ref api_val) = api_kind {
+            model_map.insert(
+                serde_yaml::Value::String("api".to_string()),
+                serde_yaml::Value::String(api_val.clone()),
+            );
+        }
+        updates.insert(
+            serde_yaml::Value::String("models".to_string()),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(model_map)]),
+        );
     }
 
     let updated_yaml = update_yaml_providers(&existing_raw, &prov, &updates)?;

@@ -115,6 +115,11 @@ test('inline math renders as code.md-math-inline', () => {
   const html = render('$E=mc^2$ inline');
   assert.match(html, /<code class="md-math-inline">E=mc\^2<\/code>/);
 });
+test('currency amounts are not mistaken for inline math', () => {
+  const input = 'Prices: $5 and $10.';
+  assert.deepEqual(md.parseInline(input), [input]);
+  assert.equal(render(input), '<p>Prices: $5 and $10.</p>');
+});
 
 test('block math renders as div.md-math', () => {
   const blocks = md.parseBlocks('$$\nE=mc^2\n$$');

@@ -177,11 +177,13 @@ const CSS = `/* Fonts bundled locally via @fontsource; no CDN dependency. */
 .cp .sess-head{display:flex;align-items:center;gap:12px;padding:12px 22px;border-bottom:1px solid var(--glass-line)}
 .cp .sess-head h1{font:600 24px/1.15 var(--font-serif);letter-spacing:-.005em}
 .cp .sess-head p{color:var(--text-3);font-size:12.5px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:3px}
-.cp .transcript{flex:1;overflow:auto;padding:18px 22px 10px;display:flex;flex-direction:column;gap:12px;min-height:0}
+.cp .transcript{flex:1;overflow:auto;padding:18px 22px 10px;display:flex;flex-direction:column;gap:12px;min-height:0;align-items:center}
 .cp .transcript:focus-visible{outline-offset:-2px}
-.cp .msg{max-width:74ch;min-width:0}
+.cp .msg{max-width:74ch;min-width:0;width:min(100%,74ch)}
+.cp .msg.asst{align-self:flex-start}
+.cp .transcript>.tool,.cp .transcript>.card{width:min(100%,74ch);align-self:center}
 .cp .msg .body{white-space:pre-wrap;word-break:break-word}
-.cp .msg.user{align-self:flex-start;background:rgba(238,247,249,.88);border:1px solid rgba(140,205,213,.42);padding:9px 15px;border-radius:16px 16px 16px 5px;box-shadow:0 8px 24px rgba(4,10,13,.26),inset 0 1px 0 rgba(255,255,255,.85);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+.cp .msg.user{align-self:flex-end;width:auto;max-width:min(74ch,85%);background:rgba(238,247,249,.88);border:1px solid rgba(140,205,213,.42);padding:9px 15px;border-radius:16px 16px 16px 5px;box-shadow:0 8px 24px rgba(4,10,13,.26),inset 0 1px 0 rgba(255,255,255,.85);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
 .cp .msg.user .body{font:400 19px/1.45 var(--font-serif);color:#10242B}
 .cp[data-theme="light"] .msg.user{background:rgba(255,255,255,.94);border:1px solid rgba(71,157,170,.28);box-shadow:0 6px 18px rgba(25,51,61,.08),inset 0 1px 0 #ffffff}
 .cp[data-theme="light"] .msg.user .body{color:#142830}
@@ -1406,7 +1408,7 @@ export default function CanoPi() {
           <div className={'scrim-rail' + (railOpen ? ' on' : '')} onClick={closeRail} />
           <main className="work" ref={workRef} id="main">
             <div className="top-split">
-              {!ss ? <Home /> : view === 'conv' ? <Conversation key={ss.id} /> : <Board key={ss.id} />}
+              {!ss ? <Home /> : view === 'dashboard' ? <Dashboard key={ss.id} /> : view === 'conv' ? <Conversation key={ss.id} /> : <Board key={ss.id} />}
               {ss && insp && ss.agents[insp] && <Inspector key={ss.id + insp} />}
             </div>
             {ss && view === 'conv' && <TaskStrip />}
@@ -1483,6 +1485,7 @@ function Topbar() {
       <button className="tbtn" disabled={!ss} aria-pressed={view === 'board' && !!ss} title={ss ? `${c.in_progress} in progress, ${c.blocked} blocked` : 'Open a session first'} aria-label={ss ? `Tasks, ${c.in_progress} in progress, ${c.blocked} blocked` : 'Tasks'} onClick={() => A.setView(view === 'board' ? 'conv' : 'board')}>
         <Kanban size={14} /><span className="lbl">Tasks</span>{ss && c.in_progress + c.blocked > 0 && <span className="count">{c.in_progress + c.blocked}</span>}
       </button>
+      <button className="tbtn" aria-pressed={view === 'dashboard'} aria-label="Dashboard" onClick={() => A.setView(view === 'dashboard' ? 'conv' : 'dashboard')}><Activity size={14} /><span className="lbl">Dashboard</span></button>
       <button className="tbtn" disabled={!ss} title={ss ? '' : 'Open a session first'} aria-label="Browser" onClick={() => A.openInspector(A.insp || 'main', 'browser')}><Globe size={14} /><span className="lbl">Browser</span></button>
       <button className="ibtn theme-btn" onClick={A.toggleTheme} aria-label={A.theme === 'dark' ? 'Switch to Cloud Light' : 'Switch to Midnight Sky'} title={A.theme === 'dark' ? 'Midnight Sky. Switch to Cloud Light' : 'Cloud Light. Switch to Midnight Sky'}>{A.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}</button>
       <button className="ibtn" onClick={() => A.setDrawer('models')} aria-label="Settings"><Settings size={16} /></button>
@@ -1604,6 +1607,25 @@ function Home() {
   );
 }
 
+/* ================================================================ dashboard */
+function Dashboard() {
+  const A = useApp(); const { ss, providerConfig, availableModels, liveModel, conn, engine } = A;
+  const tasks = ss ? ss.todo.flatMap(p => p.tasks) : [];
+  const counts = tasks.reduce((out, task) => { out[task.status] = (out[task.status] || 0) + 1; return out; }, {});
+  return (
+    <section className="board" aria-label="Dashboard">
+      <header className="board-h"><div><h1>Dashboard</h1><p>Live canoPi session and provider configuration. Request telemetry unavailable.</p></div><button className="btn" onClick={() => A.setView("conv")}>Back to conversation</button></header>
+      <div className="board-grid">
+        <section className="board-card"><h2>Engine</h2><p role="status">{conn === 'connected' ? 'Connected' : conn === 'idle' ? 'Installed, no active session' : 'Disconnected'}</p><small>{engine.error || 'Runtime status from canoPi bridge'}</small></section>
+        <section className="board-card"><h2>Active model</h2><p>{liveModel ? `${liveModel.provider}/${liveModel.modelId}` : 'No active model reported'}</p><small>{availableModels.length} models reported by active OMP session</small></section>
+        <section className="board-card"><h2>Providers</h2>{providerConfig.providers.length ? <ul>{providerConfig.providers.map((p, i) => <li key={i}>{p.name || p.provider || 'Provider'}{p.hasKey ? ' · credential configured' : ' · no credential reported'}</li>)}</ul> : <p>No configured providers reported.</p>}</section>
+        <section className="board-card"><h2>Session tasks</h2><p>{ss ? `${tasks.length} tasks · ${counts.in_progress || 0} in progress · ${counts.completed || 0} completed` : 'No active session'}</p><small>{ss ? `Scope: ${ss.name} (active session only)` : 'Open a session to view its OMP task state'}</small></section>
+        <section className="board-card"><h2>Request telemetry</h2><p>Unavailable</p><small>canoPi/OMP does not currently expose request-level provider, latency, or limit telemetry here.</small></section>
+      </div>
+    </section>
+  );
+}
+
 /* ================================================================ conversation */
 function Conversation() {
   const A = useApp(); const ss = A.ss; const m = ss.agents.main; const ref = useRef(null);
@@ -1710,7 +1732,11 @@ function Composer() {
         <button type="submit" className="send" aria-label="Send message" disabled={off || !hasModels || !value.trim()}><ArrowUp size={17} /></button>
       </div>
       <div className="c-meta">
-        <button type="button" className="chip" onClick={() => A.setDrawer('models')}>{A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : (A.providerConfig?.configured ? 'Provider saved — new session needed' : 'Configure model')}</button>
+        <label>Model <select aria-label="Active model" disabled={!hasModels} value={A.liveModel ? A.liveModel.provider+'/'+A.liveModel.modelId : ''} onChange={e => A.changeModel(e.target.value)}>
+          <option value="">{hasModels ? 'Choose model' : (ss ? 'No models reported by this session' : 'Open a session to load models')}</option>
+          {A.availableModels.map((m, i) => <option key={i} value={m.provider+'/'+(m.id || m.modelId)}>{m.provider}/{m.id || m.modelId}</option>)}
+        </select></label>
+        <button type="button" className="chip" onClick={() => A.setDrawer('models')} title="Configure providers and models in drawer">Config</button>
         <label>Thinking <select aria-label="Thinking level" disabled={!(A.thinkingLevels && A.thinkingLevels.length)} value={A.thinkingLevel ?? ''} onChange={e => A.setThinking(e.target.value)}>
           {(A.thinkingLevels && A.thinkingLevels.length ? A.thinkingLevels : [A.thinkingLevel]).filter(Boolean).map(o => <option key={o} value={o}>{String(o).charAt(0).toUpperCase()+String(o).slice(1)}</option>)}
         </select></label>
@@ -2124,6 +2150,8 @@ function ProviderSetupSection() {
             <option value="google">Google Gemini</option>
             <option value="openrouter">OpenRouter</option>
             <option value="groq">Groq</option>
+            <option value="mistral">Mistral AI</option>
+            <option value="together">Together AI</option>
             <option value="xai">xAI (Grok)</option>
             <option value="deepseek">DeepSeek</option>
             <option value="custom">Custom (OpenAI-compatible)</option>

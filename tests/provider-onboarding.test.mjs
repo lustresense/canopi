@@ -38,13 +38,15 @@ test('provider onboarding is API-key-first and does not make 9Router default', (
   assert.match(react, /value="google"/);
   assert.match(react, /value="openrouter"/);
   assert.match(react, /value="groq"/);
+  assert.match(react, /value="mistral"/);
+  assert.match(react, /value="together"/);
   assert.match(react, /value="xai"/);
   assert.match(react, /value="deepseek"/);
   assert.match(react, /value="custom"/);
-  // 9Router, Mistral, Together should NOT be in the list
+  // 9Router is not a bundled provider choice
   assert.doesNotMatch(react, /value="9router"/);
-  assert.doesNotMatch(react, /value="mistral"/);
-  assert.doesNotMatch(react, /value="together"/);
+  assert.match(react, /value="mistral"/);
+  assert.match(react, /value="together"/);
   // Input uses password field with autocomplete off
   assert.match(react, /type="password"/);
   assert.match(react, /autoComplete="off"/);
@@ -104,19 +106,21 @@ test('safe data root recovery is exposed in UI for unowned root startup failures
 });
 
 test('bundled provider choices and transport selector follow canonical OMP rules', () => {
-  // Real bundled provider choices offered in UI (strict list: Anthropic, OpenAI, Google Gemini, OpenRouter, Groq, xAI, DeepSeek, Custom)
+  // Real bundled provider choices offered in UI (built-in providers supported by native Rust config)
   assert.match(react, /value="anthropic"/);
   assert.match(react, /value="openai"/);
   assert.match(react, /value="google"/);
   assert.match(react, /value="openrouter"/);
   assert.match(react, /value="groq"/);
+  assert.match(react, /value="mistral"/);
+  assert.match(react, /value="together"/);
   assert.match(react, /value="xai"/);
   assert.match(react, /value="deepseek"/);
   assert.match(react, /value="custom"/);
-  // 9Router, Mistral, Together should NOT be in the list
+  // 9Router is not a bundled provider choice
   assert.doesNotMatch(react, /value="9router"/);
-  assert.doesNotMatch(react, /value="mistral"/);
-  assert.doesNotMatch(react, /value="together"/);
+  assert.match(react, /value="mistral"/);
+  assert.match(react, /value="together"/);
 
   // Custom transport API selector offers valid OMP values
   assert.match(react, /value="openai-completions"/);
@@ -403,3 +407,26 @@ test('reconnect button is outside workspace inert container in CanoPi JSX struct
   assert.match(react, /isValidDialogFrame/);
 });
 
+test("provider save writes model definitions in native OMP models array", () => {
+  const rust = readFileSync(new URL("../src-tauri/src/main.rs", import.meta.url), "utf8");
+  const writer = rust.split("async fn provider_save_key(")[1].split("#[tauri::command]", 1)[0];
+  assert.match(writer, /Value::String\(\"models\"\.to_string\(\)\)/);
+  assert.match(writer, /Value::String\(\"id\"\.to_string\(\)\)/);
+  assert.doesNotMatch(writer, /Value::String\(\"modelId\"\.to_string\(\)\)/);
+  assert.match(writer, /let updated_yaml = update_yaml_providers\(&existing_raw, &prov, &updates\)\?;/);
+  // Optional api: api is nested within model definition when present, but model ID is independent of api None
+  assert.match(writer, /if let Some\(ref mid\) = clean_model_id \{[\s\S]*?if let Some\(ref api_val\) = api_kind/);
+  // api_kind optionality contract: model-id block never gated by an outer api guard
+  const midIdx = writer.indexOf('if let Some(ref mid) = clean_model_id');
+  const apiIdx = writer.indexOf('if let Some(ref api_val) = api_kind');
+  assert.ok(midIdx !== -1, 'model-id block must exist');
+  assert.ok(apiIdx !== -1, 'api guard must exist');
+  assert.ok(apiIdx > midIdx, 'api guard must nest inside model-id block, not precede it');
+  assert.strictEqual((writer.match(/if let Some\(ref api_val\) = api_kind/g) || []).length, 1, 'exactly one api guard');
+  const idIdx = writer.indexOf('Value::String("id".to_string())', midIdx);
+  const nameIdx = writer.indexOf('Value::String("name".to_string())', midIdx);
+  assert.ok(idIdx > midIdx && idIdx < apiIdx, 'model id written before optional api');
+  assert.ok(nameIdx > idIdx && nameIdx < apiIdx, 'model name written before optional api');
+  const modelsIdx = writer.indexOf('Value::String("models".to_string())', apiIdx);
+  assert.ok(modelsIdx > apiIdx, 'models array written regardless of api_kind')
+});

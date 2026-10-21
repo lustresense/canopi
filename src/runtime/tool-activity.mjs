@@ -121,9 +121,18 @@ export function upsertActivity(rows, entry) {
  */
 export function retainRows(rows, cap) {
   if (rows.length <= cap) return rows;
-  let remove = rows.length - cap;
-  const kept = rows.filter(row => row.status === 'running' || remove-- <= 0);
-  return kept.length <= cap ? kept : kept.slice(kept.length - cap);
+  if (cap <= 0) return [];
+  const runningCount = rows.reduce((count, row) => count + (row.status === 'running' ? 1 : 0), 0);
+  if (runningCount > cap) return rows.slice(-cap);
+  let completedToRemove = rows.length - cap;
+  return rows.filter(row => {
+    if (row.status === 'running') return true;
+    if (completedToRemove > 0) {
+      completedToRemove--;
+      return false;
+    }
+    return true;
+  });
 }
 
 /**

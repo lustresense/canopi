@@ -1,0 +1,37 @@
+diff --git a/CANOPI_SOURCE_FORK.md b/CANOPI_SOURCE_FORK.md
+new file mode 100644
+index 0000000..2adf3ca
+--- /dev/null
++++ b/CANOPI_SOURCE_FORK.md
+@@ -0,0 +1,5 @@
++# canoPi source fork overlay
++
++This checkout is compiled from pinned Oh My Pi source.
++The build-binary.ts artifact identity is patched to `cnp-engine`; no upstream release EXE was downloaded or renamed.
++RPC wire methods stay OMP compatible. User-visible CLI help and internal strings are not fully rebranded in v0.2.
+diff --git a/packages/coding-agent/scripts/build-binary.ts b/packages/coding-agent/scripts/build-binary.ts
+index 28ffeff..e3f5ec6 100644
+--- a/packages/coding-agent/scripts/build-binary.ts
++++ b/packages/coding-agent/scripts/build-binary.ts
+@@ -79,7 +79,7 @@ async function main(): Promise<void> {
+ 		process.platform === "darwin" &&
+ 		(!crossBuild || crossBuild.platform === "darwin") &&
+ 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
+-	const outName = crossBuild ? `omp-${crossBuild.id}` : "omp";
++	const outName = crossBuild ? `cnp-engine-${crossBuild.id}` : "cnp-engine";
+ 	const outputPath = path.join(packageDir, "dist", outName);
+ 	// Generate inside the try so the finally always restores the empty checked-in
+ 	// placeholders (stats client archive, docs index) even on failure.
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 7d67ef4..04bebbb 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -2476,7 +2476,7 @@ export async function runRootCommand(
+ 				notifs.push({ kind: "error", message: modelRegistryError.message });
+ 			}
+ 
+-			if (!isInteractive && !session.model) {
++			if (!isInteractive && mode !== "rpc" && mode !== "rpc-ui" && !session.model) {
+ 				if (modelRegistryError) {
+ 					process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
+ 				}

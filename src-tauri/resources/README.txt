@@ -1,0 +1,1 @@
+Source package deliberately omits cnp-engine.exe and OMP legal files. Windows CI compiles the engine from pinned source and copies its licensing files into resources before packaging. No placeholder EXE is permitted.

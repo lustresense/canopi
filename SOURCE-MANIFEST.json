@@ -1,0 +1,344 @@
+{
+  "schema": 1,
+  "devCommit": "17b48950ba5dea0f550d8ead77cb0f123e456627",
+  "version": "0.0.1",
+  "exportPolicySha256": "e21240986a3e114510b95d350e9cd32db5946c2cf6006885aa34b78b70fb50d2",
+  "files": {
+    ".gitignore": {
+      "sha256": "fc9c9d433e77c46e14d227441c9387f5240f2931f0e7c6d81dec1fd1a69ed3f8",
+      "mode": "100644"
+    },
+    "BUILD-WINDOWS.cmd": {
+      "sha256": "d3d0bd2a4782204ce1fad6686c7c6133bd882d223eb9b0b90ec6bbbfe1eb8092",
+      "mode": "100644"
+    },
+    "CHANGELOG.md": {
+      "sha256": "972720bb5acd77f66af2ca7ebc19a62e64a5d64400952cc70deca1f7d7081e8e",
+      "mode": "100644"
+    },
+    "LICENSE": {
+      "sha256": "d7e2a44e7dfe89e8be3f7ee11a51e797d8acb6389757b7a4cffefb42292eaf9a",
+      "mode": "100644"
+    },
+    "README.md": {
+      "sha256": "a75d5cf753be5ac47839e379a43d588ebd041063ecab78e2975e4494a50ed11e",
+      "mode": "100644"
+    },
+    "THIRD_PARTY_NOTICES.md": {
+      "sha256": "129db23d67832ddfcc9ce4a0426d27074aa629fc1546aa8a6fee4f1e00009d4c",
+      "mode": "100644"
+    },
+    "assets/canopi-overview.png": {
+      "sha256": "ce95c3962c7123b5e53b3979f2bb38feb3afc401087887e569fb230c3aab3f30",
+      "mode": "100644"
+    },
+    "docs/BUILD.md": {
+      "sha256": "2f2af27d7efcb59ad90ca0f5ef52f7d98e7f09b26abbce33372286795fd58097",
+      "mode": "100644"
+    },
+    "docs/CONFIGURATION.md": {
+      "sha256": "edbb9b0c68f5799e9d76886d12bfb6ab0e3a0d60c7da48b8d40d4ef4190f8504",
+      "mode": "100644"
+    },
+    "docs/INSTALL.md": {
+      "sha256": "fc8f3002d83f3673d0b89b7deba3b6bdf2e4c723a44d3c8c1584af46ef23f31e",
+      "mode": "100644"
+    },
+    "docs/KNOWN_LIMITATIONS.md": {
+      "sha256": "709a386dfe83f0f271f9b6f3dfe13db93a8778233f876015f05a12d84632e42f",
+      "mode": "100644"
+    },
+    "docs/ORIGINAL_CANOPI_WORKSPACE.jsx": {
+      "sha256": "f401b336e71d17204434efd4e14ce6e67e9bccdaa1d72010d5b22bd2fe34f297",
+      "mode": "100644"
+    },
+    "docs/TROUBLESHOOTING.md": {
+      "sha256": "d2e352345123ffe03b65b9e0c32c21a3b7ce9b1d573817db63b295b24de8eff3",
+      "mode": "100644"
+    },
+    "index.html": {
+      "sha256": "ba66c5bacfe43741954017807f5ed898051ad62ba35531cebdc6a25a610e4e2c",
+      "mode": "100644"
+    },
+    "package-lock.json": {
+      "sha256": "8f3ad7800753bc6e655bb14e555dac06b0d71fa6cdc37f516bb8777279128719",
+      "mode": "100644"
+    },
+    "package.json": {
+      "sha256": "677a32ff5d80cca6cad9af7b236d9e94bdef4c545c42e8cf69dfd6bf6de20c0b",
+      "mode": "100644"
+    },
+    "patches/omp/0001-cnp-engine-artifact-identity.patch": {
+      "sha256": "b3ee94f2e02248efee36a0ba5acc8c7e704933728c7ceba26c0393e33b853647",
+      "mode": "100644"
+    },
+    "patches/omp/0002-canoPi-transport-endpoint-security.patch": {
+      "sha256": "f3a93e56b87819b04a3731b132c3da482597aec2a82afcc6fcc6531eb0909ff9",
+      "mode": "100644"
+    },
+    "scripts/build-engine.ps1": {
+      "sha256": "04fac460f7349af34f6b3eb0c0642ce5158fb6ec501ffc0ba6f1987c505aed70",
+      "mode": "100644"
+    },
+    "scripts/build-windows.ps1": {
+      "sha256": "e13c616958252464648ead6a2006ded8cd219ec17c5a3f3119328526d14480d8",
+      "mode": "100644"
+    },
+    "scripts/collect-release-evidence.ps1": {
+      "sha256": "1478722174c546fa35503f8c21f0678ea909896cfd5dc23340ee84ab0062c897",
+      "mode": "100644"
+    },
+    "scripts/patch-omp.mjs": {
+      "sha256": "86dd5e14238417ff7fb10bc7f47ae224fc002dddf414920948a423606538b6d9",
+      "mode": "100644"
+    },
+    "scripts/rpc-smoke.py": {
+      "sha256": "7e506b27f7bbdaaac03bbcfe66b1ad7ddece4f6f662825fbf98cbaf219335cdb",
+      "mode": "100644"
+    },
+    "scripts/sign-engine.ps1": {
+      "sha256": "f1c71f1a94318f26041b3867322c43c172e4ffac6a02027b46aba29e68a925df",
+      "mode": "100644"
+    },
+    "scripts/test-uninstall-data.ps1": {
+      "sha256": "31dc75717f80dd10f2f11d3441232dfe439ec9cdfabb0610dabf76a7f5769ed5",
+      "mode": "100644"
+    },
+    "scripts/test-uninstall-windows.ps1": {
+      "sha256": "9e19ec0acc86dc5832d5b786fb1d77c5325301dfcc2b84efcf9a1ca8b2b71b54",
+      "mode": "100644"
+    },
+    "scripts/upgrade-smoke.ps1": {
+      "sha256": "83269bb42b7f3bfff8a2057d005c75377513fc77ed18e6e2274639633b4c2717",
+      "mode": "100644"
+    },
+    "scripts/verify-engine-provenance.py": {
+      "sha256": "24c3fb8c929749675632cbff1d6e02cca9165776296c73ef4c6f31796334c24c",
+      "mode": "100644"
+    },
+    "scripts/verify-installed-runtime.ps1": {
+      "sha256": "d8752e7998a93d7c5e8525c25a71fa98548c3e7072a542824ab9704060791dac",
+      "mode": "100644"
+    },
+    "src-tauri/Cargo.lock": {
+      "sha256": "e9c320dc9113ef0963f472af2f9b923fa6690c94c862c136d34e180dafb61afc",
+      "mode": "100644"
+    },
+    "src-tauri/Cargo.toml": {
+      "sha256": "9b59a9fed3656f9bc1a3563ed09f3d5726b75247956f675bc0d13c5568ffc0c7",
+      "mode": "100644"
+    },
+    "src-tauri/build.rs": {
+      "sha256": "eda00e9a41a309b4b94e28fed2d0b185da01b847afb126259e843d61122959e3",
+      "mode": "100644"
+    },
+    "src-tauri/capabilities/default.json": {
+      "sha256": "0232b92de066d0869ba80e71a38f9d853fc0eabcc6669d02d9a8c5b4668cd50e",
+      "mode": "100644"
+    },
+    "src-tauri/icons/128x128.png": {
+      "sha256": "d8cf6ee555d064cdc92b6e233acdb2e8c6ae798c87af438d8dac09cd3072153b",
+      "mode": "100644"
+    },
+    "src-tauri/icons/128x128@2x.png": {
+      "sha256": "bf6df114eca94f5d7723da6ef6fb8ad6618ee4235766b62c9dac92dce5552777",
+      "mode": "100644"
+    },
+    "src-tauri/icons/32x32.png": {
+      "sha256": "3f8a19bf2f00120f9a314a4ef5033a6c12343692870213566f61e58cbd63ac31",
+      "mode": "100644"
+    },
+    "src-tauri/icons/icon.ico": {
+      "sha256": "86669e0d599e7b2559bc08c5e9c7d47a115764a471b6cfa137194079ccdb734f",
+      "mode": "100644"
+    },
+    "src-tauri/icons/icon.png": {
+      "sha256": "d396f8c1e46de3b7c7d4dc13a921a69e0476c32b0682cc0e3cde19745d028b02",
+      "mode": "100644"
+    },
+    "src-tauri/resources/README.txt": {
+      "sha256": "1454dc01f76d2ad8efef696527cffa28772b3b9af80db14c89d5151f428d58d2",
+      "mode": "100644"
+    },
+    "src-tauri/resources/engine/README.md": {
+      "sha256": "acc41c168988a7d5d7d28bed73a1a11a7852e045f50dbf064896fd133c21b063",
+      "mode": "100644"
+    },
+    "src-tauri/resources/licenses/README.md": {
+      "sha256": "4e559e6224d4d5af85aee9f671b070a3693e3fda285653bdd0ff076027160b3f",
+      "mode": "100644"
+    },
+    "src-tauri/src/main.rs": {
+      "sha256": "929dfa32449503142029623d76b994b639a2b22d6333c45b27ca533db81491c8",
+      "mode": "100644"
+    },
+    "src-tauri/src/native/browser.rs": {
+      "sha256": "5805c6612dd68fc2fd508216b112d8772b8510c1f8781f25ccc10adf9f09d825",
+      "mode": "100644"
+    },
+    "src-tauri/src/native/mod.rs": {
+      "sha256": "11acf672b45a8461b4c348afaca3669b1a8e47aa2988d88aff2daad28011e417",
+      "mode": "100644"
+    },
+    "src-tauri/src/native/webview2.rs": {
+      "sha256": "ee922af9c42a658502993cb2e80854620d7683eddd629a581aab3b5bd59bab2a",
+      "mode": "100644"
+    },
+    "src-tauri/src/provider_endpoint.rs": {
+      "sha256": "0cd52af7a538f88fac5698aa10c7f565e28b60cbb7adffef55b4a9ad23ec7e00",
+      "mode": "100644"
+    },
+    "src-tauri/src/rpc_framing.rs": {
+      "sha256": "900c48ae73cc97c38253e0ba4abb080d97903abbb13c7b4acf5c2342119602fc",
+      "mode": "100644"
+    },
+    "src-tauri/tauri.conf.json": {
+      "sha256": "fdda6e03a140e69153dc1968377a277fa40f4a6768ededa9fb031739b0276a9d",
+      "mode": "100644"
+    },
+    "src-tauri/windows/hooks.nsh": {
+      "sha256": "03a453975274d4fd22abe70d0bae9f524e2ef9fdf45eb659bd93643d4b4de2c4",
+      "mode": "100644"
+    },
+    "src-tauri/windows/stop-canopi-processes.ps1": {
+      "sha256": "f020395e916319af27085703fc19159f08b075257280c77e940ab93b0ae8c1f7",
+      "mode": "100644"
+    },
+    "src-tauri/windows/uninstall-data.ps1": {
+      "sha256": "58c4efb42bcb42fcacc14c297b1f48ecc85e931c2d51c6bcbcb829834489f767",
+      "mode": "100644"
+    },
+    "src/app/CanoPi.jsx": {
+      "sha256": "e8d137ac060e7d80ac9fe3f556429688fe90b513e14c1ddf5cf23cb23d454de4",
+      "mode": "100644"
+    },
+    "src/components/ProviderImport.jsx": {
+      "sha256": "a0cc14886011c01cbc14a01f5216dd5d8f791dc153c70de3b8401e00f78eb04e",
+      "mode": "100644"
+    },
+    "src/main.jsx": {
+      "sha256": "ffa3db8f126311a0ab96c71a8d7d2b82fd90fc8ee31894c3cf7696ef22e9d112",
+      "mode": "100644"
+    },
+    "src/runtime/event-queue.mjs": {
+      "sha256": "34762e697709564be06dfcb94f0294541a2d2e6b57814d1e2b4f8550770e235a",
+      "mode": "100644"
+    },
+    "src/runtime/frame-model.mjs": {
+      "sha256": "eeb51570127002bf7866ecd26720ad8ad026858806c7b1de29a25b176a397287",
+      "mode": "100644"
+    },
+    "src/runtime/live-projection.mjs": {
+      "sha256": "b79d2c157523b1a9d95c09f621d68352942594169a979e00da605c6853c8057e",
+      "mode": "100644"
+    },
+    "src/runtime/markdown.jsx": {
+      "sha256": "d480d20797a595bbd18a0303187caf60617c5266aba10e9f4986ebc2e2780330",
+      "mode": "100644"
+    },
+    "src/runtime/native.js": {
+      "sha256": "619124082b665fd903e51e1480053f02cb8a324875d222020a949622d7c9ae4d",
+      "mode": "100644"
+    },
+    "src/runtime/omp.js": {
+      "sha256": "523c5b3b4d9fec180f9fcc890bf011c27f97644c740b0b23cf379434454bce72",
+      "mode": "100644"
+    },
+    "src/runtime/omp.test.mjs": {
+      "sha256": "50262f180423d650bfa978526aa25970817e0906548a176a25b1bd1bb3918dac",
+      "mode": "100644"
+    },
+    "src/runtime/projection.mjs": {
+      "sha256": "e160d330d65f2332b1ad4642595ad587ee43ffcab00cc2f915e0e6e98225f51e",
+      "mode": "100644"
+    },
+    "src/runtime/provider-login.mjs": {
+      "sha256": "f5baa6d813cb3a35d76e56e0a1a8650e18e418b4687905cfe3de4a0569beef4b",
+      "mode": "100644"
+    },
+    "src/runtime/rpc-frame.mjs": {
+      "sha256": "3b7a21508cc48a3d13d7aa0307b15fe7d33808aa322582ec1448b5f313d37f69",
+      "mode": "100644"
+    },
+    "src/runtime/session-bootstrap.mjs": {
+      "sha256": "4171c830040163fb87b1acd27d24823232e41d169f5f0fa0ae07a613ec522470",
+      "mode": "100644"
+    },
+    "src/runtime/tool-activity.mjs": {
+      "sha256": "15c72990922cbd7ec17255ec3c3a1399bd34d94212f5c4dc126b57fa3ac6966b",
+      "mode": "100644"
+    },
+    "src/runtime/workspace.mjs": {
+      "sha256": "f30ab3e0b6c49831371e9c2c4b77b949499234fde8a8733c05b71fb38f9b1806",
+      "mode": "100644"
+    },
+    "tests/event-queue.test.mjs": {
+      "sha256": "feb3d9d6b0a51373478cb7a5f747199eb96678330886677c4ea0bef3cf17ae71",
+      "mode": "100644"
+    },
+    "tests/frame-model.test.mjs": {
+      "sha256": "57f7d535dbfcc1f8ca82bbc53adfde0a909fe00686d91e1508e858f0ce4f3552",
+      "mode": "100644"
+    },
+    "tests/frontend-boot.test.mjs": {
+      "sha256": "f468eef5da4d6d1cf7e29445ce9ec12c61f162985f70362b162280ca819d9b83",
+      "mode": "100644"
+    },
+    "tests/live-projection.test.mjs": {
+      "sha256": "3e6da43b5c76027d312a07f84a33e7a5eca66c0fccb8e0c6914e23a396d9fa25",
+      "mode": "100644"
+    },
+    "tests/markdown-gfm.test.mjs": {
+      "sha256": "6f4ad7b4c77580352eb29e6208d19d88134143e614b192ceb83f8153929c5f71",
+      "mode": "100644"
+    },
+    "tests/oauth-login.test.mjs": {
+      "sha256": "20b241b6232d624487bd928d6630c7eb8e73ee9867c06cf37fe0574e8534698d",
+      "mode": "100644"
+    },
+    "tests/package-contract.test.mjs": {
+      "sha256": "bbf6a1bca47716c96afb682d3e9133185e578f2f00d51d0c7531d2d34351e56f",
+      "mode": "100644"
+    },
+    "tests/preservation.test.mjs": {
+      "sha256": "833df34142b0e59112ea5011bd851ec0dc95b25a038aadca3bcb4af6c53adb9c",
+      "mode": "100644"
+    },
+    "tests/projection.test.mjs": {
+      "sha256": "7ca6d659031764ffc89305c664608e658612e2a756c1e5c272650ee65bc5e9e9",
+      "mode": "100644"
+    },
+    "tests/provider-onboarding.test.mjs": {
+      "sha256": "7bee6e882b16bc1b5c3a8b9f7d1efe19af5ea1c5fdebc1992930ba2d32428d3d",
+      "mode": "100644"
+    },
+    "tests/rpc-framing.test.mjs": {
+      "sha256": "a928a558fbb8ef36504cc321cd2af3ab351226ab850eadb62bc74457f3a257db",
+      "mode": "100644"
+    },
+    "tests/smart-router-preset.test.mjs": {
+      "sha256": "f88fff4c901a44327909b97d5777cc1686c67c223c3b7c8945fe3cb31b2b1ed6",
+      "mode": "100644"
+    },
+    "tests/syntax.test.mjs": {
+      "sha256": "f3164217c2bb78f683e2947342e8bbb003d3a60a5c2a0b8e2fc1bf5bfc16f3a8",
+      "mode": "100644"
+    },
+    "tests/tool-activity.test.mjs": {
+      "sha256": "6517b6b8da6fce4310f611803ea0530ef2971202b152cd34889e28f339027f93",
+      "mode": "100644"
+    },
+    "tests/workspace-persistence.test.mjs": {
+      "sha256": "760013871ef96dcab87f7bf80c121350cce6c07675c22c54aca2fa458f417571",
+      "mode": "100644"
+    },
+    "upstream/PINNED_COMMIT.txt": {
+      "sha256": "78c8956fbb9713963e7a30f80f3233910d2344c83ba37f16faea37e7fbbc17a3",
+      "mode": "100644"
+    },
+    "vite.config.js": {
+      "sha256": "daac80eb59f1901a7e7043421b637f9b481a3377ba1518f8f5c50e77f0a71c37",
+      "mode": "100644"
+    }
+  }
+}

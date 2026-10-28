@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "canoPi main window: restricted IPC and user-initiated folder picker",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}
